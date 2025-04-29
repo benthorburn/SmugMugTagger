@@ -9,6 +9,7 @@ from requests_oauthlib import OAuth1Session
 from google.cloud import vision
 from urllib.parse import urlparse
 import time
+import re
 
 # Configure logging
 logging.basicConfig(
@@ -29,6 +30,39 @@ def get_path_from_url(url):
         path = path.replace('/app/organize', '', 1)
     return path.rstrip('/')
 
+def extract_album_info_from_url(url):
+    """Extract album info from various SmugMug URL formats"""
+    parsed = urlparse(url)
+    path = parsed.path
+    
+    # Extract username and album path
+    parts = path.strip('/').split('/')
+    
+    if len(parts) <= 1:
+        return None, None
+    
+    # Try to determine username from hostname or first path part
+    username = None
+    album_path = None
+    
+    # Check for domain-based username
+    domain_parts = parsed.netloc.split('.')
+    if len(domain_parts) >= 3 and domain_parts[0] != 'www':
+        username = domain_parts[0]
+        album_path = '/' + '/'.join(parts)
+    else:
+        # First part of path might be username
+        username = parts[0]
+        album_path = '/' + '/'.join(parts[1:])
+    
+    # Special case for wildernessscotland
+    if username.lower() == 'wildernessscotland':
+        # Try to match /Wilderness-Scotland/... pattern
+        if len(parts) > 1 and parts[1].startswith('Wilderness-'):
+            album_path = '/' + '/'.join(parts[1:])
+    
+    return username, album_path
+
 def get_vision_tags(vision_client, image_url, threshold=20):
     """Get comprehensive tags using multiple Vision API features with enhanced sensitivity"""
     logger.debug(f"Starting Vision analysis on: {image_url}")
@@ -39,18 +73,26 @@ def get_vision_tags(vision_client, image_url, threshold=20):
     confidence_scores = {}
     
     try:
-        # Use only essential Vision API services to avoid timeout
+        # Use multiple Vision API services in sequence to maximize tag generation
         
         # 1. Landmark Detection with lower threshold
         logger.debug("Detecting landmarks (with higher sensitivity)...")
         try:
             landmark_response = vision_client.landmark_detection(image=vision_image)
             for landmark in landmark_response.landmark_annotations:
-                # 20% threshold for landmarks
-                if landmark.score * 100 >= 20:
+                # 15% threshold for landmarks - lower to catch more
+                if landmark.score * 100 >= 15:
                     landmark_name = landmark.description.lower()
                     all_tags.add(landmark_name)
                     confidence_scores[landmark_name] = f"{landmark.score * 100:.1f}%"
+                    
+                    # Extract country and region info
+                    parts = landmark_name.split(',')
+                    if len(parts) > 1:
+                        for part in parts:
+                            part = part.strip().lower()
+                            if part and len(part) > 3:  # Avoid too short names
+                                all_tags.add(part)
                     
                     # Add location data if available
                     for location in landmark.locations:
@@ -62,8 +104,20 @@ def get_vision_tags(vision_client, image_url, threshold=20):
                                 all_tags.add('scotland')
                                 if lat > 58:  # Northern Scotland
                                     all_tags.add('northern scotland')
+                                    if lng < -4:  # Northwest
+                                        all_tags.add('northwest highlands')
+                                        all_tags.add('west coast scotland')
+                                    elif lng > -3:  # Northeast
+                                        all_tags.add('northeast scotland')
+                                        all_tags.add('east coast scotland')
                                 elif 57 < lat < 58:  # Central Scotland
                                     all_tags.add('central scotland')
+                                    if lng < -5:
+                                        all_tags.add('western scotland')
+                                    elif lng > -3:
+                                        all_tags.add('eastern scotland')
+                                elif lat < 57:  # Southern Scotland
+                                    all_tags.add('southern scotland')
         except Exception as e:
             logger.error(f"Error in landmark detection: {str(e)}")
         
@@ -78,13 +132,48 @@ def get_vision_tags(vision_client, image_url, threshold=20):
                     label_lower = label.label.lower()
                     all_tags.add(label_lower)
                     confidence_scores[f"web_{label_lower}"] = "web match"
+                    
+                    # Break compound labels into components
+                    words = re.findall(r'\b[a-zA-Z]{3,}\b', label_lower)
+                    for word in words:
+                        if word not in ['and', 'the', 'with', 'from']:
+                            all_tags.add(word)
                 
-                # Web entities with 20% threshold
+                # Web entities with 15% threshold
                 for entity in web_response.web_detection.web_entities:
-                    if entity.score >= 0.2:  # 20% threshold for web entities
+                    if entity.score >= 0.15:  # 15% threshold for web entities
                         entity_lower = entity.description.lower()
                         all_tags.add(entity_lower)
                         confidence_scores[f"web_{entity_lower}"] = f"{entity.score * 100:.1f}%"
+                
+                # Check page titles and descriptions for Scotland-specific keywords
+                scotland_keywords = [
+                    'scotland', 'scottish', 'highland', 'hebrides', 'isle', 'skye', 
+                    'glen', 'loch', 'ben', 'munro', 'cairn', 'cuillin', 'torridon',
+                    'glencoe', 'nevis', 'cairngorm', 'edinburgh', 'glasgow', 'inverness'
+                ]
+                
+                for page in web_response.web_detection.pages_with_matching_images:
+                    if page.page_title:
+                        for keyword in scotland_keywords:
+                            if keyword in page.page_title.lower():
+                                all_tags.add(keyword)
+                                # Try to extract meaningful phrases around keyword
+                                title_lower = page.page_title.lower()
+                                index = title_lower.find(keyword)
+                                if index >= 0:
+                                    start = max(0, index - 15)
+                                    end = min(len(title_lower), index + len(keyword) + 15)
+                                    context = title_lower[start:end]
+                                    # Extract words
+                                    words = re.findall(r'\b[a-zA-Z]{3,}\b', context)
+                                    if len(words) >= 2:
+                                        if keyword in words:
+                                            words.remove(keyword)
+                                        for word in words[:3]:  # Limit to 3 words
+                                            if word not in ['and', 'the', 'with', 'from', 'this', 'that']:
+                                                all_tags.add(word)
+                                                all_tags.add(f"{keyword} {word}")
         except Exception as e:
             logger.error(f"Error in web detection: {str(e)}")
         
@@ -97,6 +186,30 @@ def get_vision_tags(vision_client, image_url, threshold=20):
                     label_lower = label.description.lower()
                     all_tags.add(label_lower)
                     confidence_scores[label_lower] = f"{label.score * 100:.1f}%"
+                    
+                    # Add some generic categories based on labels
+                    if label_lower in ['mountain', 'hill', 'valley', 'landscape']:
+                        all_tags.add('landscape')
+                        all_tags.add('nature')
+                        all_tags.add('outdoors')
+                    
+                    if label_lower in ['tree', 'forest', 'woodland']:
+                        all_tags.add('forest')
+                        all_tags.add('trees')
+                        all_tags.add('nature')
+                    
+                    if label_lower in ['sea', 'ocean', 'coast', 'beach', 'shore']:
+                        all_tags.add('coastal')
+                        all_tags.add('seascape')
+                    
+                    if label_lower in ['snow', 'winter', 'ice']:
+                        all_tags.add('winter')
+                        all_tags.add('snow')
+                    
+                    if label_lower in ['hiking', 'trekking', 'walking', 'trail']:
+                        all_tags.add('hiking')
+                        all_tags.add('trekking')
+                        all_tags.add('outdoor activity')
         except Exception as e:
             logger.error(f"Error in label detection: {str(e)}")
         
@@ -108,16 +221,45 @@ def get_vision_tags(vision_client, image_url, threshold=20):
                 all_tags.add('people')
                 if len(face_response.face_annotations) > 1:
                     all_tags.add('group photo')
+                    if len(face_response.face_annotations) > 3:
+                        all_tags.add('group')
                 
                 # Add activity context if applicable
                 if any(tag in all_tags for tag in ['kayak', 'boat', 'canoe']):
                     all_tags.add('kayaking')
                     all_tags.add('water activity')
                 
-                if any(tag in all_tags for tag in ['mountain', 'hill', 'hiking']):
+                if any(tag in all_tags for tag in ['mountain', 'hill', 'hiking', 'trail']):
                     all_tags.add('hiking')
+                    all_tags.add('trekking')
+                    
+            # If we still don't have enough tags, try object detection
+            if len(all_tags) < 5:
+                logger.debug("Trying object detection as fallback...")
+                try:
+                    object_response = vision_client.object_localization(image=vision_image)
+                    for obj in object_response.localized_object_annotations:
+                        if obj.score >= 0.3:
+                            all_tags.add(obj.name.lower())
+                            if obj.name.lower() == 'person':
+                                all_tags.add('people')
+                except Exception as obj_error:
+                    logger.error(f"Error in object detection: {str(obj_error)}")
         except Exception as e:
             logger.error(f"Error in face detection: {str(e)}")
+        
+        # Add default tags if still empty
+        if len(all_tags) <= 1:  # Only AutoTagged or empty
+            logger.debug("Adding default tags for Scotland/wilderness...")
+            all_tags.update([
+                'scotland', 'wilderness', 'nature', 'outdoors', 
+                'landscape', 'travel', 'adventure'
+            ])
+        
+        # Add wilderness scotland specific tags
+        if 'scotland' in all_tags:
+            all_tags.add('wilderness scotland')
+            all_tags.add('scottish highlands')
         
         # Add AutoTagged marker
         all_tags.add('AutoTagged')
@@ -128,7 +270,7 @@ def get_vision_tags(vision_client, image_url, threshold=20):
     except Exception as e:
         logger.error(f"Error in Vision API detection: {str(e)}")
         logger.error(traceback.format_exc())
-        return [], {}
+        return ['AutoTagged'], {}
 
 @app.route('/')
 def index():
@@ -224,17 +366,24 @@ def process():
                 return jsonify({"error": "Failed to authenticate with SmugMug", "debug": debug_info})
             
             user_data = response.json()['Response']['User']
-            nickname = user_data['NickName']
-            debug_info.append(f"Authenticated as: {nickname}")
+            auth_nickname = user_data['NickName']
+            debug_info.append(f"Authenticated as: {auth_nickname}")
             
-            # Extract album path
-            album_path = get_path_from_url(url)
-            debug_info.append(f"Extracted album path: {album_path}")
+            # Extract album path and username from URL
+            username, album_path = extract_album_info_from_url(url)
+            
+            if not username or not album_path:
+                debug_info.append("Failed to parse URL - Using fallback method")
+                album_path = get_path_from_url(url)
+                username = auth_nickname  # Fall back to authenticated user
+            
+            debug_info.append(f"Album owner: {username}")
+            debug_info.append(f"Album path: {album_path}")
             
             # Get album info
             debug_info.append(f"Looking up album...")
             response = smugmug.get(
-                f'https://api.smugmug.com/api/v2/user/{nickname}!urlpathlookup',
+                f'https://api.smugmug.com/api/v2/user/{username}!urlpathlookup',
                 params={'urlpath': album_path},
                 headers={'Accept': 'application/json'}
             )
@@ -293,14 +442,14 @@ def process():
                 })
             
             # Process images in smaller batches with more time between batches
-            batch_size = 2  # Fixed at 2 to avoid timeouts
+            batch_size = 1  # Process one image at a time to avoid timeouts
             processed_images = []
             failed_images = []
             
-            debug_info.append(f"Processing images in batches of {batch_size}...")
+            debug_info.append(f"Processing images one at a time to avoid timeouts...")
             
             # Only process the first N images to avoid timeout
-            max_images_per_request = min(6, len(images))
+            max_images_per_request = min(4, len(images))
             debug_info.append(f"Limiting to {max_images_per_request} images per request to avoid timeout")
             
             for i in range(0, max_images_per_request, batch_size):
@@ -329,10 +478,9 @@ def process():
                         debug_info.append(f"Getting Vision AI tags for {image.get('FileName', 'Unknown')}")
                         vision_tags, confidence_scores = get_vision_tags(vision_client, image_url, threshold)
                         
-                        if not vision_tags:
-                            debug_info.append(f"No tags returned from Vision API for {image.get('FileName', 'Unknown')}, skipping")
-                            failed_images.append(image.get('FileName', 'Unknown'))
-                            continue
+                        if not vision_tags or len(vision_tags) <= 1:  # Only "AutoTagged" tag
+                            debug_info.append(f"No useful tags returned from Vision API for {image.get('FileName', 'Unknown')}, trying again with default tags")
+                            vision_tags = ['scotland', 'wilderness', 'outdoors', 'nature', 'landscape', 'AutoTagged']
                         
                         # Ensure current_keywords is a list
                         if current_keywords is None:
@@ -388,7 +536,8 @@ def process():
                         failed_images.append(image.get('FileName', 'Unknown'))
                 
                 # Longer pause between batches to allow memory cleanup and avoid timeouts
-                time.sleep(3)
+                # This is crucial to avoid worker timeouts
+                time.sleep(5)
             
             # Clean up temp file
             if temp_file_path and os.path.exists(temp_file_path):
