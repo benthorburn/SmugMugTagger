@@ -9,6 +9,7 @@ from requests_oauthlib import OAuth1Session
 from google.cloud import vision
 from urllib.parse import urlparse
 import time
+import concurrent.futures
 
 # Configure logging
 logging.basicConfig(
@@ -29,7 +30,7 @@ def get_path_from_url(url):
         path = path.replace('/app/organize', '', 1)
     return path.rstrip('/')
 
-def get_vision_tags(vision_client, image_url, threshold=30):
+def get_vision_tags(vision_client, image_url, threshold=20):
     """Get comprehensive tags using multiple Vision API features with enhanced sensitivity"""
     logger.debug(f"Starting Vision analysis on: {image_url}")
     vision_image = vision.Image()
@@ -39,132 +40,121 @@ def get_vision_tags(vision_client, image_url, threshold=30):
     confidence_scores = {}
     
     try:
-        # 1. Landmark Detection with lower threshold specifically for landmarks
+        # Use only essential Vision API services to avoid timeout
+        
+        # 1. Landmark Detection with lower threshold
         logger.debug("Detecting landmarks (with higher sensitivity)...")
-        landmark_response = vision_client.landmark_detection(image=vision_image)
-        for landmark in landmark_response.landmark_annotations:
-            # Lower threshold just for landmarks (15% confidence instead of 30%)
-            if landmark.score * 100 >= 15:
-                landmark_name = landmark.description.lower()
-                all_tags.add(landmark_name)
-                confidence_scores[landmark_name] = f"{landmark.score * 100:.1f}%"
-                
-                # Add location data if available
-                for location in landmark.locations:
-                    if location.lat_lng:
-                        lat = location.lat_lng.latitude
-                        lng = location.lat_lng.longitude
-                        # Add Scotland-specific location tags
-                        if 56 < lat < 59:  # Scotland
-                            all_tags.add('scotland')
-                            if lat > 58:  # Northern Scotland
-                                all_tags.add('northern scotland')
-                                if lng < -4:  # Northwest
-                                    all_tags.add('northwest highlands')
-                                    all_tags.add('west coast')
-                                elif lng > -3:  # Northeast
-                                    all_tags.add('northeast scotland')
-                                    all_tags.add('east coast')
-                            elif 57 < lat < 58:  # Central Scotland
-                                all_tags.add('central scotland')
-                            if lng < -5:  # Western Scotland
-                                all_tags.add('western scotland')
-                            elif lng > -3:  # Eastern Scotland
-                                all_tags.add('eastern scotland')
+        try:
+            landmark_response = vision_client.landmark_detection(image=vision_image)
+            for landmark in landmark_response.landmark_annotations:
+                # 20% threshold for landmarks
+                if landmark.score * 100 >= 20:
+                    landmark_name = landmark.description.lower()
+                    all_tags.add(landmark_name)
+                    confidence_scores[landmark_name] = f"{landmark.score * 100:.1f}%"
+                    
+                    # Add location data if available
+                    for location in landmark.locations:
+                        if location.lat_lng:
+                            lat = location.lat_lng.latitude
+                            lng = location.lat_lng.longitude
+                            # Add Scotland-specific location tags
+                            if 56 < lat < 59:  # Scotland
+                                all_tags.add('scotland')
+                                if lat > 58:  # Northern Scotland
+                                    all_tags.add('northern scotland')
+                                elif 57 < lat < 58:  # Central Scotland
+                                    all_tags.add('central scotland')
+        except Exception as e:
+            logger.error(f"Error in landmark detection: {str(e)}")
         
-        # 2. Web Detection for better landmark recognition
+        # 2. Web Detection for better landmark recognition - most effective for landmarks
         logger.debug("Running web detection for better landmark recognition...")
-        web_response = vision_client.web_detection(image=vision_image)
-        
-        if web_response.web_detection:
-            # Best guess labels often identify landmarks better
-            for label in web_response.web_detection.best_guess_labels:
-                label_lower = label.label.lower()
-                all_tags.add(label_lower)
-                confidence_scores[f"web_{label_lower}"] = "web match"
+        try:
+            web_response = vision_client.web_detection(image=vision_image)
             
-            # Web entities with lower threshold
-            for entity in web_response.web_detection.web_entities:
-                if entity.score >= 0.15:  # 15% threshold for web entities
-                    entity_lower = entity.description.lower()
-                    all_tags.add(entity_lower)
-                    confidence_scores[f"web_{entity_lower}"] = f"{entity.score * 100:.1f}%"
-            
-            # Also get entities from visually similar images
-            if web_response.web_detection.pages_with_matching_images:
+            if web_response.web_detection:
+                # Best guess labels often identify landmarks better
+                for label in web_response.web_detection.best_guess_labels:
+                    label_lower = label.label.lower()
+                    all_tags.add(label_lower)
+                    confidence_scores[f"web_{label_lower}"] = "web match"
+                
+                # Web entities with 20% threshold
+                for entity in web_response.web_detection.web_entities:
+                    if entity.score >= 0.2:  # 20% threshold for web entities
+                        entity_lower = entity.description.lower()
+                        all_tags.add(entity_lower)
+                        confidence_scores[f"web_{entity_lower}"] = f"{entity.score * 100:.1f}%"
+                
+                # Process web page titles
                 for page in web_response.web_detection.pages_with_matching_images:
                     if page.page_title:
-                        # Extract potential landmark names from page titles
-                        title_words = page.page_title.lower().split()
-                        
-                        # Look for potential landmark indicators
+                        # Potential landmark indicators in Scottish context
                         landmark_indicators = ['castle', 'lighthouse', 'point', 'isle', 'loch', 'ben', 'hill', 
-                                              'mountain', 'stacks', 'bridge', 'monument', 'falls', 'glen']
+                                              'mountain', 'stacks', 'bridge', 'glen', 'cairn', 'conic', 'duncansby',
+                                              'eilean', 'donan', 'skye', 'highland', 'scotland']
                         
+                        title_lower = page.page_title.lower()
                         for indicator in landmark_indicators:
-                            if indicator in page.page_title.lower():
-                                # Extract the full phrase containing the indicator
-                                title_lower = page.page_title.lower()
-                                start = max(0, title_lower.find(indicator) - 20)
-                                end = min(len(title_lower), title_lower.find(indicator) + len(indicator) + 20)
-                                potential_landmark = title_lower[start:end].strip()
+                            if indicator in title_lower:
+                                # Extract a reasonable chunk around the indicator
+                                start = max(0, title_lower.find(indicator) - 15)
+                                end = min(len(title_lower), title_lower.find(indicator) + len(indicator) + 15)
+                                phrase = title_lower[start:end].strip()
                                 
-                                # Clean up the potential landmark name
-                                for char in [',', '|', '-', ':', '(', ')', '.']:
-                                    potential_landmark = potential_landmark.replace(char, ' ')
+                                # Clean up the phrase
+                                for char in [',', '|', '-', ':', '(', ')', '.', '"', "'"]:
+                                    phrase = phrase.replace(char, ' ')
                                 
-                                words = potential_landmark.split()
-                                if len(words) > 1 and len(words) < 6:  # Avoid single words or too long phrases
+                                # Split into words and reconstruct a cleaner phrase
+                                words = [w for w in phrase.split() if len(w) > 2]
+                                if len(words) >= 2 and len(words) <= 5:
                                     potential_landmark = ' '.join(words)
                                     all_tags.add(potential_landmark)
-                                    confidence_scores[f"web_match_{potential_landmark}"] = "web page match"
                                     
-                                    # Also add the simple landmark name
-                                    # Find word containing landmark indicator
-                                    for word in words:
-                                        if indicator in word:
-                                            idx = words.index(word)
-                                            # Get previous word + indicator word if available
-                                            if idx > 0:
-                                                landmark_name = words[idx-1] + ' ' + word
-                                                all_tags.add(landmark_name)
-                                                confidence_scores[f"extracted_{landmark_name}"] = "extracted from web"
+                                    # Look for specific Scottish landmarks
+                                    if "eilean" in potential_landmark and "donan" in potential_landmark:
+                                        all_tags.add("eilean donan castle")
+                                    if "conic" in potential_landmark and "hill" in potential_landmark:
+                                        all_tags.add("conic hill")
+                                    if "duncansby" in potential_landmark:
+                                        all_tags.add("duncansby stacks")
+                                    if "eilean" in potential_landmark and "glas" in potential_landmark:
+                                        all_tags.add("eilean glas lighthouse")
+        except Exception as e:
+            logger.error(f"Error in web detection: {str(e)}")
         
-        # 3. Label Detection (general objects, scenes, activities)
+        # 3. Label Detection - essential for scene context
         logger.debug("Analyzing general content...")
-        label_response = vision_client.label_detection(image=vision_image)
-        for label in label_response.label_annotations:
-            if label.score * 100 >= threshold:
-                label_lower = label.description.lower()
-                all_tags.add(label_lower)
-                confidence_scores[label_lower] = f"{label.score * 100:.1f}%"
+        try:
+            label_response = vision_client.label_detection(image=vision_image)
+            for label in label_response.label_annotations:
+                if label.score * 100 >= threshold:
+                    label_lower = label.description.lower()
+                    all_tags.add(label_lower)
+                    confidence_scores[label_lower] = f"{label.score * 100:.1f}%"
+        except Exception as e:
+            logger.error(f"Error in label detection: {str(e)}")
         
-        # 4. Object Detection
-        logger.debug("Detecting specific objects...")
-        object_response = vision_client.object_localization(image=vision_image)
-        for obj in object_response.localized_object_annotations:
-            if obj.score * 100 >= threshold:
-                obj_name = obj.name.lower()
-                all_tags.add(obj_name)
-                confidence_scores[obj_name] = f"{obj.score * 100:.1f}%"
-        
-        # 5. Face Detection
+        # 4. People Detection via Face Detection (lightweight)
         logger.debug("Detecting people...")
-        face_response = vision_client.face_detection(image=vision_image)
-        if face_response.face_annotations:
-            all_tags.add('people')
-            if len(face_response.face_annotations) > 1:
-                all_tags.add('group photo')
-            
-            # Check for activity context
-            if any(activity in all_tags for activity in ['kayak', 'boat', 'hiking', 'mountain']):
-                all_tags.add('outdoor activity')
+        try:
+            face_response = vision_client.face_detection(image=vision_image)
+            if face_response.face_annotations:
+                all_tags.add('people')
+                if len(face_response.face_annotations) > 1:
+                    all_tags.add('group photo')
                 
-                if 'kayak' in all_tags or 'boat' in all_tags:
+                # Add activity context if applicable
+                if any(tag in all_tags for tag in ['kayak', 'boat', 'canoe']):
+                    all_tags.add('kayaking')
                     all_tags.add('water activity')
                 
-                if 'hiking' in all_tags or 'mountain' in all_tags:
+                if any(tag in all_tags for tag in ['mountain', 'hill', 'hiking']):
                     all_tags.add('hiking')
+        except Exception as e:
+            logger.error(f"Error in face detection: {str(e)}")
         
         # Add AutoTagged marker
         all_tags.add('AutoTagged')
@@ -179,7 +169,7 @@ def get_vision_tags(vision_client, image_url, threshold=30):
 
 @app.route('/')
 def index():
-    """Render the main page"""
+    """Render the main page with improved UI"""
     return render_template('index.html')
 
 @app.route('/process', methods=['POST'])
@@ -190,7 +180,7 @@ def process():
     
     try:
         url = request.form.get('album_url')
-        threshold = float(request.form.get('threshold', 30))
+        threshold = float(request.form.get('threshold', 20))
         
         debug_info.append(f"Processing URL: {url}")
         debug_info.append(f"Threshold: {threshold}")
@@ -339,16 +329,20 @@ def process():
                     "debug": debug_info
                 })
             
-            # Process images - limit to 3 at a time to avoid memory issues
-            batch_size = 3
+            # Process images in smaller batches with more time between batches
+            batch_size = 2  # Reduce batch size to 2 to avoid timeouts
             processed_images = []
             failed_images = []
             
             debug_info.append(f"Processing images in batches of {batch_size}...")
             
-            for i in range(0, len(images), batch_size):
+            # Only process the first N images to avoid timeout
+            max_images_per_request = min(6, len(images))
+            debug_info.append(f"Limiting to {max_images_per_request} images per request to avoid timeout")
+            
+            for i in range(0, max_images_per_request, batch_size):
                 batch = images[i:i+batch_size]
-                debug_info.append(f"Processing batch {i//batch_size + 1}/{(len(images)-1)//batch_size + 1} ({len(batch)} images)")
+                debug_info.append(f"Processing batch {i//batch_size + 1}/{(max_images_per_request-1)//batch_size + 1} ({len(batch)} images)")
                 
                 for image in batch:
                     try:
@@ -430,8 +424,8 @@ def process():
                         debug_info.append(f"Error trace: {error_trace}")
                         failed_images.append(image.get('FileName', 'Unknown'))
                 
-                # Brief pause between batches to allow memory cleanup
-                time.sleep(2)
+                # Longer pause between batches to allow memory cleanup and avoid timeouts
+                time.sleep(3)
             
             # Clean up temp file
             if temp_file_path and os.path.exists(temp_file_path):
@@ -441,14 +435,20 @@ def process():
                 except Exception as e:
                     debug_info.append(f"Error removing temp file: {str(e)}")
             
+            remaining_images = len(images) - max_images_per_request
+            message = f"Processing complete: {len(processed_images)} images tagged successfully, {len(failed_images)} failed"
+            if remaining_images > 0:
+                message += f". Note: {remaining_images} images were skipped to avoid timeout. Consider processing the album in multiple batches."
+            
             return jsonify({
                 "success": True,
-                "message": f"Processing complete: {len(processed_images)} images tagged successfully, {len(failed_images)} failed",
+                "message": message,
                 "processedImages": processed_images,
                 "failedImages": failed_images,
                 "totalImages": len(images),
-                "successfullyProcessed": len(processed_images),
-                "failed": len(failed_images),
+                "processedCount": len(processed_images),
+                "failedCount": len(failed_images),
+                "skippedCount": remaining_images,
                 "albumUrl": album_data['WebUri'],
                 "debug": debug_info
             })
