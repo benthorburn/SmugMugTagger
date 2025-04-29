@@ -8,6 +8,7 @@ import tempfile
 from requests_oauthlib import OAuth1Session
 from google.cloud import vision
 from urllib.parse import urlparse
+import time
 
 # Configure logging
 logging.basicConfig(
@@ -51,13 +52,12 @@ def get_vision_client():
         os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = credentials_path
         client = vision.ImageAnnotatorClient()
         
-        # Clean up temp file
-        os.unlink(credentials_path)
-        return client
+        # Don't delete temp file yet as it needs to remain for further usage
+        return client, credentials_path
     else:
         creds_file = Path.home() / "Desktop" / "SmugMugTagger" / "credentials" / "google_credentials.json"
         os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = str(creds_file)
-        return vision.ImageAnnotatorClient()
+        return vision.ImageAnnotatorClient(), None
 
 def get_path_from_url(url):
     """Extract path from SmugMug URL"""
@@ -66,6 +66,80 @@ def get_path_from_url(url):
     if path.startswith('/app/organize'):
         path = path.replace('/app/organize', '', 1)
     return path.rstrip('/')
+
+def get_vision_tags(vision_client, image_url, threshold=30):
+    """Get comprehensive tags using multiple Vision API features"""
+    vision_image = vision.Image()
+    vision_image.source.image_uri = image_url
+    
+    all_tags = set()
+    confidence_scores = {}
+    
+    try:
+        # 1. Label Detection (general objects, scenes, activities)
+        label_response = vision_client.label_detection(image=vision_image)
+        for label in label_response.label_annotations:
+            if label.score * 100 >= threshold:
+                label_lower = label.description.lower()
+                all_tags.add(label_lower)
+                confidence_scores[label_lower] = f"{label.score * 100:.1f}%"
+        
+        # 2. Object Detection
+        object_response = vision_client.object_localization(image=vision_image)
+        for obj in object_response.localized_object_annotations:
+            if obj.score * 100 >= threshold:
+                obj_name = obj.name.lower()
+                all_tags.add(obj_name)
+                confidence_scores[obj_name] = f"{obj.score * 100:.1f}%"
+        
+        # 3. Landmark Detection
+        landmark_response = vision_client.landmark_detection(image=vision_image)
+        for landmark in landmark_response.landmark_annotations:
+            if landmark.score * 100 >= threshold:
+                landmark_name = landmark.description.lower()
+                all_tags.add(landmark_name)
+                confidence_scores[landmark_name] = f"{landmark.score * 100:.1f}%"
+                
+                # Add location data if available
+                for location in landmark.locations:
+                    if location.lat_lng:
+                        lat = location.lat_lng.latitude
+                        lng = location.lat_lng.longitude
+                        # Add Scotland-specific location tags
+                        if 56 < lat < 59:  # Scotland
+                            all_tags.add('scotland')
+                            if lat > 58:  # Northern Scotland
+                                all_tags.add('northern scotland')
+                                if lng < -4:  # Northwest
+                                    all_tags.add('northwest highlands')
+                                    all_tags.add('west coast')
+                                elif lng > -3:  # Northeast
+                                    all_tags.add('northeast scotland')
+                                    all_tags.add('east coast')
+                            elif 57 < lat < 58:  # Central Scotland
+                                all_tags.add('central scotland')
+                            if lng < -5:  # Western Scotland
+                                all_tags.add('western scotland')
+                            elif lng > -3:  # Eastern Scotland
+                                all_tags.add('eastern scotland')
+        
+        # 4. Web Detection
+        web_response = vision_client.web_detection(image=vision_image)
+        if web_response.web_detection:
+            for entity in web_response.web_detection.web_entities:
+                if entity.score >= threshold/100:  # Convert to 0-1 scale
+                    entity_lower = entity.description.lower()
+                    all_tags.add(entity_lower)
+                    confidence_scores[f"web_{entity_lower}"] = f"{entity.score * 100:.1f}%"
+        
+        # Add AutoTagged marker
+        all_tags.add('AutoTagged')
+        
+        return list(all_tags), confidence_scores
+    
+    except Exception as e:
+        logger.error(f"Error in Vision API detection: {str(e)}")
+        return [], {}
 
 @app.route('/')
 def index():
@@ -76,6 +150,7 @@ def index():
 def process():
     """Process the album URL and threshold from the form"""
     debug_info = []
+    temp_file_path = None
     
     try:
         url = request.form.get('album_url')
@@ -103,7 +178,12 @@ def process():
             smugmug = get_smugmug_client()
             debug_info.append("SmugMug client initialized successfully")
             
-            # Step 2: Get user info
+            # Step 2: Initialize Vision client
+            debug_info.append("Initializing Vision client...")
+            vision_client, temp_file_path = get_vision_client()
+            debug_info.append("Vision client initialized successfully")
+            
+            # Step 3: Get user info
             debug_info.append("Getting user info...")
             response = smugmug.get(
                 'https://api.smugmug.com/api/v2!authuser',
@@ -119,11 +199,11 @@ def process():
             nickname = user_data['NickName']
             debug_info.append(f"Authenticated as: {nickname}")
             
-            # Step 3: Extract album path
+            # Step 4: Extract album path
             album_path = get_path_from_url(url)
             debug_info.append(f"Extracted album path: {album_path}")
             
-            # Step 4: Get album info
+            # Step 5: Get album info
             debug_info.append(f"Looking up album...")
             response = smugmug.get(
                 f'https://api.smugmug.com/api/v2/user/{nickname}!urlpathlookup',
@@ -149,7 +229,7 @@ def process():
             album_name = album_data['Name']
             debug_info.append(f"Found album: '{album_name}' with key: {album_key}")
             
-            # Step 5: Get images
+            # Step 6: Get images
             debug_info.append("Getting images from album...")
             response = smugmug.get(
                 f'https://api.smugmug.com/api/v2/album/{album_key}!images',
@@ -179,11 +259,119 @@ def process():
                     "debug": debug_info
                 })
             
-            # For now, return success with image count
+            # Step 7: Process each image
+            processed_images = []
+            failed_images = []
+            
+            debug_info.append("Starting to process images...")
+            
+            for idx, image in enumerate(images):
+                try:
+                    debug_info.append(f"Processing image {idx+1}/{len(images)}: {image.get('FileName', 'Unknown')}")
+                    
+                    # Check if already tagged
+                    current_keywords = image.get('KeywordArray', [])
+                    if 'AutoTagged' in current_keywords:
+                        debug_info.append(f"Image already tagged, skipping")
+                        continue
+                    
+                    # Get image URLs
+                    image_key = f"{image['ImageKey']}-0"
+                    image_url = image.get('ArchivedUri') or image.get('WebUri')
+                    thumbnail_url = image.get('ThumbnailUrl')
+                    
+                    if not image_url:
+                        debug_info.append(f"No image URL found, skipping")
+                        failed_images.append(image.get('FileName', 'Unknown'))
+                        continue
+                    
+                    # Get Vision AI tags
+                    debug_info.append(f"Getting Vision AI tags for image")
+                    vision_tags, confidence_scores = get_vision_tags(vision_client, image_url, threshold)
+                    debug_info.append(f"Found {len(vision_tags)} tags")
+                    
+                    if not vision_tags:
+                        debug_info.append(f"No tags returned from Vision API, skipping")
+                        failed_images.append(image.get('FileName', 'Unknown'))
+                        continue
+                    
+                    # Combine with existing tags
+                    all_tags = list(dict.fromkeys(current_keywords + vision_tags))
+                    debug_info.append(f"Combined tags: {all_tags}")
+                    
+                    # Update the image
+                    debug_info.append(f"Updating base image...")
+                    update_data = {
+                        'KeywordArray': all_tags,
+                        'ShowKeywords': True
+                    }
+                    
+                    # Update base image
+                    base_response = smugmug.patch(
+                        f'https://api.smugmug.com/api/v2/image/{image_key}',
+                        headers={
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        json=update_data
+                    )
+                    
+                    if base_response.status_code != 200:
+                        debug_info.append(f"Error updating base image: {base_response.status_code}")
+                        debug_info.append(f"Response: {base_response.text}")
+                        failed_images.append(image.get('FileName', 'Unknown'))
+                        continue
+                    
+                    # Update album image
+                    debug_info.append(f"Updating album image...")
+                    album_response = smugmug.patch(
+                        f'https://api.smugmug.com/api/v2/album/{album_key}/image/{image_key}',
+                        headers={
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        },
+                        json=update_data
+                    )
+                    
+                    if album_response.status_code != 200:
+                        debug_info.append(f"Error updating album image: {album_response.status_code}")
+                        debug_info.append(f"Response: {album_response.text}")
+                        failed_images.append(image.get('FileName', 'Unknown'))
+                        continue
+                    
+                    # Success
+                    debug_info.append(f"Successfully tagged image")
+                    processed_images.append({
+                        'filename': image.get('FileName', 'Unknown'),
+                        'keywords': all_tags,
+                        'thumbnailUrl': thumbnail_url
+                    })
+                    
+                    # Brief pause between images to prevent rate limiting
+                    time.sleep(1)
+                    
+                except Exception as e:
+                    error_trace = traceback.format_exc()
+                    debug_info.append(f"Error processing image: {str(e)}")
+                    debug_info.append(f"Error trace: {error_trace}")
+                    failed_images.append(image.get('FileName', 'Unknown'))
+            
+            # Clean up temp file if it exists
+            if temp_file_path:
+                try:
+                    os.unlink(temp_file_path)
+                    debug_info.append("Cleaned up temporary credentials file")
+                except Exception as e:
+                    debug_info.append(f"Error removing temp file: {str(e)}")
+            
             return jsonify({
                 "success": True,
-                "message": f"Found {len(images)} images in album '{album_name}'",
+                "message": f"Processing complete: {len(processed_images)} images tagged successfully, {len(failed_images)} failed",
+                "processedImages": processed_images,
+                "failedImages": failed_images,
                 "totalImages": len(images),
+                "successfullyProcessed": len(processed_images),
+                "failed": len(failed_images),
                 "albumUrl": album_data['WebUri'],
                 "debug": debug_info
             })
@@ -191,13 +379,31 @@ def process():
         except Exception as e:
             error_traceback = traceback.format_exc()
             debug_info.append(f"Processing error: {str(e)}")
-            debug_info.append(f"Traceback: {error_traceback}")
+            debug_info.append(f"Error trace: {error_traceback}")
+            
+            # Clean up temp file if it exists
+            if temp_file_path:
+                try:
+                    os.unlink(temp_file_path)
+                    debug_info.append("Cleaned up temporary credentials file")
+                except Exception as clean_e:
+                    debug_info.append(f"Error removing temp file: {str(clean_e)}")
+                    
             return jsonify({"error": str(e), "debug": debug_info})
     
     except Exception as e:
         error_traceback = traceback.format_exc()
         debug_info.append(f"Top-level error: {str(e)}")
-        debug_info.append(f"Traceback: {error_traceback}")
+        debug_info.append(f"Error trace: {error_traceback}")
+        
+        # Clean up temp file if it exists
+        if temp_file_path:
+            try:
+                os.unlink(temp_file_path)
+                debug_info.append("Cleaned up temporary credentials file")
+            except Exception as clean_e:
+                debug_info.append(f"Error removing temp file: {str(clean_e)}")
+                
         return jsonify({"error": str(e), "debug": debug_info})
 
 @app.route('/test-credentials')
