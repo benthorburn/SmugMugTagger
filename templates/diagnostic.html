@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>SmugMug Tagger Diagnostics</title>
+    <title>SmugMug Tagger - Diagnostic</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body {
@@ -10,24 +10,68 @@
             margin: 0 auto;
             padding: 20px;
             line-height: 1.6;
+            background-color: #242224;
+            color: #f0f0f0;
         }
-        h1, h2 {
-            color: #333;
+        h1 {
+            color: #f0f0f0;
+            text-align: center;
         }
-        .section {
-            background-color: #f9f9f9;
+        .logo-container {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .logo {
+            max-width: 100%;
+            height: auto;
+        }
+        .status-card {
+            background-color: #333;
             border-radius: 8px;
             padding: 20px;
             margin-bottom: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
         }
-        .success {
-            color: green;
+        .status-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .status-title {
+            font-size: 18px;
             font-weight: bold;
         }
-        .error {
-            color: red;
+        .status-indicator {
+            padding: 5px 10px;
+            border-radius: 4px;
             font-weight: bold;
+        }
+        .status-working {
+            background-color: #2a4a2d;
+            color: #9fd9a0;
+        }
+        .status-error {
+            background-color: #4a2a2a;
+            color: #d99f9f;
+        }
+        .status-missing {
+            background-color: #4a472a;
+            color: #d9d09f;
+        }
+        .status-invalid {
+            background-color: #4a2a2a;
+            color: #d99f9f;
+        }
+        .status-not-tested {
+            background-color: #2a3a4a;
+            color: #9fbfd9;
+        }
+        .details {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #3a3a3a;
+            border-radius: 4px;
         }
         button {
             background-color: #4CAF50;
@@ -37,161 +81,143 @@
             border-radius: 4px;
             cursor: pointer;
             font-size: 16px;
-            margin-top: 10px;
         }
-        pre {
-            background-color: #f5f5f5;
-            padding: 10px;
-            border-radius: 4px;
-            overflow-x: auto;
+        button:hover {
+            background-color: #45a049;
         }
-        .form-group {
-            margin-bottom: 15px;
+        .button-section {
+            margin-top: 20px;
+            display: flex;
+            justify-content: space-between;
         }
-        label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: bold;
+        .loader {
+            border: 4px solid #444;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 2s linear infinite;
+            display: inline-block;
+            margin-right: 10px;
+            vertical-align: middle;
         }
-        input[type="text"] {
-            width: 100%;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            font-size: 16px;
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .hidden {
+            display: none;
+        }
+        a {
+            color: #4CAF50;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
         }
     </style>
 </head>
 <body>
-    <h1>SmugMug Tagger Diagnostics</h1>
-    
-    <div class="section">
-        <h2>Credential Check</h2>
-        <button id="checkCredentials">Check Credentials</button>
-        <div id="credentialResults"></div>
+    <div class="logo-container">
+        <img src="https://raw.githubusercontent.com/BenThorburn/smugmugtagger/main/static/logo.png" alt="SmugMug Auto Tagger" class="logo">
     </div>
     
-    <div class="section">
-        <h2>Test Album Path</h2>
-        <form id="testForm">
-            <div class="form-group">
-                <label for="album_url">SmugMug Album URL:</label>
-                <input type="text" id="album_url" name="album_url" required 
-                       placeholder="https://yourusername.smugmug.com/your-album">
-            </div>
-            <button type="submit">Test Album Path</button>
-        </form>
-        <div id="testResults"></div>
+    <h1>Diagnostic Page</h1>
+    
+    <div class="status-card">
+        <div class="status-header">
+            <div class="status-title">SmugMug API Connection</div>
+            <div id="smugmug-status" class="status-indicator status-not-tested">Not Tested</div>
+        </div>
+        <p>Tests connection to SmugMug using your OAuth credentials.</p>
+        <div id="smugmug-details" class="details">Run the test to see details.</div>
     </div>
     
-    <div class="section">
-        <h2>Return to Main Interface</h2>
-        <p><a href="/">Go back to the main SmugMug Tagger interface</a></p>
+    <div class="status-card">
+        <div class="status-header">
+            <div class="status-title">Google Vision API Connection</div>
+            <div id="vision-status" class="status-indicator status-not-tested">Not Tested</div>
+        </div>
+        <p>Tests connection to Google Vision API using your credentials.</p>
+        <div id="vision-details" class="details">Run the test to see details.</div>
+    </div>
+    
+    <div class="button-section">
+        <button id="test-button" onclick="runTests()">
+            <span id="button-text">Run Diagnostic Tests</span>
+            <span id="button-loader" class="loader hidden"></span>
+        </button>
+        <a href="/"><button style="background-color: #6c757d;">Back to Main Page</button></a>
     </div>
     
     <script>
-        document.getElementById('checkCredentials').addEventListener('click', function() {
-            this.disabled = true;
-            this.textContent = 'Checking...';
+        function runTests() {
+            // Show loader
+            document.getElementById('button-loader').classList.remove('hidden');
+            document.getElementById('button-text').textContent = 'Testing...';
+            document.getElementById('test-button').disabled = true;
             
+            // Reset status
+            document.getElementById('smugmug-status').className = 'status-indicator status-not-tested';
+            document.getElementById('smugmug-status').textContent = 'Testing...';
+            document.getElementById('vision-status').className = 'status-indicator status-not-tested';
+            document.getElementById('vision-status').textContent = 'Testing...';
+            
+            // Run the tests
             fetch('/test-credentials')
                 .then(response => response.json())
                 .then(data => {
-                    let html = '<h3>Results:</h3>';
+                    // Update SmugMug status
+                    updateStatus('smugmug', data.smugmug.status, data.smugmug.details);
                     
-                    // SmugMug credentials
-                    html += '<div style="margin-bottom: 20px;">';
-                    html += '<h4>SmugMug Credentials</h4>';
-                    if (data.smugmug.status === 'working') {
-                        html += `<p class="success">✓ Working: ${data.smugmug.details}</p>`;
-                    } else if (data.smugmug.status === 'error') {
-                        html += `<p class="error">✗ Error: ${data.smugmug.details}</p>`;
-                    } else if (data.smugmug.status === 'missing') {
-                        html += `<p class="error">✗ Missing: ${data.smugmug.details}</p>`;
-                    } else if (data.smugmug.status === 'invalid') {
-                        html += `<p class="error">✗ Invalid: ${data.smugmug.details}</p>`;
-                    } else {
-                        html += `<p>Status: ${data.smugmug.status} - ${data.smugmug.details}</p>`;
-                    }
-                    html += '</div>';
+                    // Update Vision status
+                    updateStatus('vision', data.vision.status, data.vision.details);
                     
-                    // Google Vision credentials
-                    html += '<div>';
-                    html += '<h4>Google Vision Credentials</h4>';
-                    if (data.vision.status === 'working') {
-                        html += `<p class="success">✓ Working: ${data.vision.details}</p>`;
-                    } else if (data.vision.status === 'error') {
-                        html += `<p class="error">✗ Error: ${data.vision.details}</p>`;
-                    } else if (data.vision.status === 'missing') {
-                        html += `<p class="error">✗ Missing: ${data.vision.details}</p>`;
-                    } else if (data.vision.status === 'invalid') {
-                        html += `<p class="error">✗ Invalid: ${data.vision.details}</p>`;
-                    } else {
-                        html += `<p>Status: ${data.vision.status} - ${data.vision.details}</p>`;
-                    }
-                    html += '</div>';
-                    
-                    document.getElementById('credentialResults').innerHTML = html;
-                    this.disabled = false;
-                    this.textContent = 'Check Credentials';
+                    // Hide loader
+                    document.getElementById('button-loader').classList.add('hidden');
+                    document.getElementById('button-text').textContent = 'Run Diagnostic Tests';
+                    document.getElementById('test-button').disabled = false;
                 })
                 .catch(error => {
-                    document.getElementById('credentialResults').innerHTML = `<p class="error">Failed to check credentials: ${error.message}</p>`;
-                    this.disabled = false;
-                    this.textContent = 'Check Credentials';
+                    // Update both with error
+                    updateStatus('smugmug', 'error', 'Error running test: ' + error.message);
+                    updateStatus('vision', 'error', 'Error running test: ' + error.message);
+                    
+                    // Hide loader
+                    document.getElementById('button-loader').classList.add('hidden');
+                    document.getElementById('button-text').textContent = 'Run Diagnostic Tests';
+                    document.getElementById('test-button').disabled = false;
                 });
-        });
+        }
         
-        document.getElementById('testForm').addEventListener('submit', function(e) {
-            e.preventDefault();
+        function updateStatus(service, status, details) {
+            const statusElement = document.getElementById(service + '-status');
+            const detailsElement = document.getElementById(service + '-details');
             
-            const albumUrl = document.getElementById('album_url').value;
-            const submitButton = this.querySelector('button');
+            // Update status indicator
+            statusElement.className = 'status-indicator status-' + status;
             
-            submitButton.disabled = true;
-            submitButton.textContent = 'Testing...';
-            document.getElementById('testResults').innerHTML = '<p>Processing, please wait...</p>';
+            // Set text based on status
+            switch(status) {
+                case 'working':
+                    statusElement.textContent = 'Working';
+                    break;
+                case 'error':
+                    statusElement.textContent = 'Error';
+                    break;
+                case 'missing':
+                    statusElement.textContent = 'Missing';
+                    break;
+                case 'invalid':
+                    statusElement.textContent = 'Invalid';
+                    break;
+                default:
+                    statusElement.textContent = 'Unknown';
+            }
             
-            fetch('/process', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                body: `album_url=${encodeURIComponent(albumUrl)}`
-            })
-            .then(response => response.json())
-            .then(data => {
-                let html = '<h3>Test Results:</h3>';
-                
-                if (data.error) {
-                    html += `<p class="error">Error: ${data.error}</p>`;
-                } else if (data.success) {
-                    html += `<p class="success">Success: ${data.message}</p>`;
-                    html += `<p>Total Images: ${data.totalImages}</p>`;
-                    if (data.albumUrl) {
-                        html += `<p>Album URL: <a href="${data.albumUrl}" target="_blank">${data.albumUrl}</a></p>`;
-                    }
-                }
-                
-                if (data.debug && data.debug.length > 0) {
-                    html += '<h4>Debug Information:</h4>';
-                    html += '<pre>';
-                    data.debug.forEach(line => {
-                        html += line + '\n';
-                    });
-                    html += '</pre>';
-                }
-                
-                document.getElementById('testResults').innerHTML = html;
-                submitButton.disabled = false;
-                submitButton.textContent = 'Test Album Path';
-            })
-            .catch(error => {
-                document.getElementById('testResults').innerHTML = `<p class="error">Failed to test album: ${error.message}</p>`;
-                submitButton.disabled = false;
-                submitButton.textContent = 'Test Album Path';
-            });
-        });
+            // Update details
+            detailsElement.textContent = details;
+        }
     </script>
 </body>
 </html>
