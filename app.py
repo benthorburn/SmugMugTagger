@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, session
 import json
 import os
 import logging
@@ -10,6 +10,8 @@ from google.cloud import vision
 from urllib.parse import urlparse
 import time
 import re
+import hashlib
+import datetime
 
 # Configure logging
 logging.basicConfig(
@@ -21,6 +23,11 @@ logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'dev_secret_key')
+
+# In-memory state cache - will be lost on app restart
+# For demonstration purposes - in production, use Redis or database
+PROCESS_STATE = {}
 
 def get_path_from_url(url):
     """Extract path from SmugMug URL"""
@@ -56,12 +63,37 @@ def extract_album_info_from_url(url):
         album_path = '/' + '/'.join(parts[1:])
     
     # Special case for wildernessscotland
-    if username.lower() == 'wildernessscotland':
+    if username and username.lower() == 'wildernessscotland':
         # Try to match /Wilderness-Scotland/... pattern
         if len(parts) > 1 and parts[1].startswith('Wilderness-'):
             album_path = '/' + '/'.join(parts[1:])
     
     return username, album_path
+
+def generate_session_id(album_url, threshold):
+    """Generate a unique session ID based on album URL and threshold"""
+    source = f"{album_url}:{threshold}:{datetime.datetime.now().strftime('%Y-%m-%d')}"
+    return hashlib.md5(source.encode()).hexdigest()
+
+def save_progress(session_id, album_key, album_name, album_url, total_images, 
+                 processed_indices, processed_images, failed_images, next_index):
+    """Save processing progress to state cache"""
+    PROCESS_STATE[session_id] = {
+        'album_key': album_key,
+        'album_name': album_name,
+        'album_url': album_url,
+        'total_images': total_images,
+        'processed_indices': processed_indices,
+        'processed_images': processed_images,
+        'failed_images': failed_images,
+        'next_index': next_index,
+        'last_updated': datetime.datetime.now().isoformat()
+    }
+    return PROCESS_STATE[session_id]
+
+def load_progress(session_id):
+    """Load processing progress from state cache"""
+    return PROCESS_STATE.get(session_id)
 
 def get_vision_tags(vision_client, image_url, threshold=20):
     """Get comprehensive tags using multiple Vision API features with enhanced sensitivity"""
@@ -176,7 +208,7 @@ def get_vision_tags(vision_client, image_url, threshold=20):
                                                 all_tags.add(f"{keyword} {word}")
         except Exception as e:
             logger.error(f"Error in web detection: {str(e)}")
-        
+     
         # 3. Label Detection - essential for scene context
         logger.debug("Analyzing general content...")
         try:
@@ -272,6 +304,136 @@ def get_vision_tags(vision_client, image_url, threshold=20):
         logger.error(traceback.format_exc())
         return ['AutoTagged'], {}
 
+def process_images_batch(smugmug, vision_client, album_key, images, 
+                       start_index, max_count, threshold=20, process_state=None):
+    """
+    Process a batch of images with robust error handling and resumability
+    
+    Args:
+        smugmug: OAuth1Session for SmugMug
+        vision_client: Vision API client
+        album_key: SmugMug album key
+        images: List of image objects from SmugMug
+        start_index: Starting index in the images list
+        max_count: Maximum number of images to process
+        threshold: Vision API threshold
+        process_state: Optional state for resumption
+        
+    Returns:
+        Tuple of (processed_images, failed_images, processed_indices, next_index)
+    """
+    processed_images = []
+    failed_images = []
+    processed_indices = []
+    
+    # Use existing state if provided
+    if process_state:
+        processed_images = process_state.get('processed_images', [])
+        failed_images = process_state.get('failed_images', [])
+        processed_indices = process_state.get('processed_indices', [])
+    
+    # Calculate upper bound based on available images
+    end_index = min(start_index + max_count, len(images))
+    
+    # Debug
+    logger.debug(f"Processing batch from {start_index} to {end_index-1} (total: {len(images)} images)")
+    
+    # Process one image at a time for stability
+    for i in range(start_index, end_index):
+        # Skip already processed
+        if i in processed_indices:
+            logger.debug(f"Skipping already processed image at index {i}")
+            continue
+            
+        image = images[i]
+        try:
+            # Check if already tagged
+            current_keywords = image.get('KeywordArray', [])
+            if current_keywords and 'AutoTagged' in current_keywords:
+                logger.debug(f"Image {image.get('FileName', 'Unknown')} already tagged, skipping")
+                processed_indices.append(i)
+                continue
+            
+            # Get image URLs
+            image_key = f"{image['ImageKey']}-0"
+            image_url = image.get('ArchivedUri') or image.get('WebUri')
+            thumbnail_url = image.get('ThumbnailUrl')
+            
+            if not image_url:
+                logger.debug(f"No image URL found for {image.get('FileName', 'Unknown')}, skipping")
+                failed_images.append(image.get('FileName', 'Unknown'))
+                continue
+            
+            # Get Vision AI tags
+            logger.debug(f"Getting Vision AI tags for {image.get('FileName', 'Unknown')}")
+            vision_tags, confidence_scores = get_vision_tags(vision_client, image_url, threshold)
+            
+            if not vision_tags or len(vision_tags) <= 1:  # Only "AutoTagged" tag
+                logger.debug(f"No useful tags returned from Vision API for {image.get('FileName', 'Unknown')}, trying again with default tags")
+                vision_tags = ['scotland', 'wilderness', 'outdoors', 'nature', 'landscape', 'AutoTagged']
+            
+            # Ensure current_keywords is a list
+            if current_keywords is None:
+                current_keywords = []
+            elif isinstance(current_keywords, str):
+                current_keywords = [current_keywords]
+            
+            # Filter out empty tags
+            vision_tags = [tag for tag in vision_tags if tag.strip()]
+            
+            # Combine with existing tags
+            all_tags = list(dict.fromkeys(current_keywords + vision_tags))
+            logger.debug(f"Combined {len(all_tags)} tags for {image.get('FileName', 'Unknown')}")
+            
+            # Update the image
+            logger.debug(f"Updating image {image_key}")
+            update_data = {
+                'KeywordArray': all_tags,
+                'ShowKeywords': True
+            }
+            
+            # Update base image
+            base_response = smugmug.patch(
+                f'https://api.smugmug.com/api/v2/image/{image_key}',
+                headers={
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json'
+                },
+                json=update_data
+            )
+            
+            if base_response.status_code != 200:
+                logger.debug(f"Error updating base image: {base_response.status_code}")
+                error_text = base_response.text
+                if len(error_text) > 500:
+                    error_text = error_text[:500] + "..."
+                logger.debug(f"Response: {error_text}")
+                failed_images.append(image.get('FileName', 'Unknown'))
+                continue
+            
+            # Success
+            logger.debug(f"Successfully tagged image {image.get('FileName', 'Unknown')}")
+            processed_images.append({
+                'filename': image.get('FileName', 'Unknown'),
+                'keywords': all_tags,
+                'thumbnailUrl': thumbnail_url
+            })
+            processed_indices.append(i)
+            
+        except Exception as e:
+            error_trace = traceback.format_exc()
+            logger.debug(f"Error processing image: {str(e)}")
+            logger.debug(f"Error trace: {error_trace}")
+            failed_images.append(image.get('FileName', 'Unknown'))
+        
+        # Pause between images - important for stability
+        time.sleep(3)
+    
+    # Set next index - end of current batch, or -1 if we've finished all images
+    next_index = end_index if end_index < len(images) else -1
+    
+    return processed_images, failed_images, processed_indices, next_index
+
 @app.route('/')
 def index():
     """Render the main page with improved UI"""
@@ -279,19 +441,39 @@ def index():
 
 @app.route('/process', methods=['POST'])
 def process():
-    """Process the album URL and threshold from the form"""
+    """Process the album URL and threshold from the form with robust resumability"""
     debug_info = []
     temp_file_path = None
     
     try:
+        # Get parameters from form
         url = request.form.get('album_url')
         threshold = float(request.form.get('threshold', 20))
+        start_index = int(request.form.get('start_index', 0))
+        session_id = request.form.get('session_id')
         
         debug_info.append(f"Processing URL: {url}")
         debug_info.append(f"Threshold: {threshold}")
+        debug_info.append(f"Start index: {start_index}")
+        debug_info.append(f"Session ID: {session_id}")
         
         if not url:
             return jsonify({"error": "No URL provided", "debug": debug_info})
+        
+        # Generate session ID if not provided
+        if not session_id:
+            session_id = generate_session_id(url, threshold)
+            debug_info.append(f"Generated session ID: {session_id}")
+        
+        # Check for existing state
+        existing_state = load_progress(session_id)
+        if existing_state and start_index == 0:
+            # We have existing state but user is starting from beginning
+            # Use the existing state's next_index to continue where we left off
+            start_index = existing_state.get('next_index', 0)
+            if start_index == -1:  # All images were processed
+                start_index = 0  # Start over
+            debug_info.append(f"Resuming from index: {start_index}")
         
         # Check if credentials are configured
         has_smugmug = bool(os.environ.get('SMUGMUG_TOKENS'))
@@ -369,42 +551,60 @@ def process():
             auth_nickname = user_data['NickName']
             debug_info.append(f"Authenticated as: {auth_nickname}")
             
-            # Extract album path and username from URL
-            username, album_path = extract_album_info_from_url(url)
+            # If we have existing state, we can skip the album lookup
+            album_key = None
+            album_url = None
+            album_name = None
+            images = None
             
-            if not username or not album_path:
-                debug_info.append("Failed to parse URL - Using fallback method")
-                album_path = get_path_from_url(url)
-                username = auth_nickname  # Fall back to authenticated user
+            if existing_state:
+                album_key = existing_state.get('album_key')
+                album_url = existing_state.get('album_url')
+                album_name = existing_state.get('album_name')
+                debug_info.append(f"Using cached album info: {album_name} ({album_key})")
+                
+                # We still need to fetch images from the API
+                # Can't cache them due to potential memory issues
             
-            debug_info.append(f"Album owner: {username}")
-            debug_info.append(f"Album path: {album_path}")
-            
-            # Get album info
-            debug_info.append(f"Looking up album...")
-            response = smugmug.get(
-                f'https://api.smugmug.com/api/v2/user/{username}!urlpathlookup',
-                params={'urlpath': album_path},
-                headers={'Accept': 'application/json'}
-            )
-            
-            if response.status_code != 200:
-                debug_info.append(f"Error looking up album - Status code: {response.status_code}")
-                debug_info.append(f"Response: {response.text}")
-                return jsonify({"error": "Failed to find album", "debug": debug_info})
-            
-            response_data = response.json()['Response']
-            debug_info.append(f"Response keys: {list(response_data.keys())}")
-            
-            # Check if we found an album
-            if 'Album' not in response_data:
-                debug_info.append("No album found in response")
-                return jsonify({"error": "Album not found", "debug": debug_info})
-            
-            album_data = response_data['Album']
-            album_key = album_data['AlbumKey']
-            album_name = album_data['Name']
-            debug_info.append(f"Found album: '{album_name}' with key: {album_key}")
+            # If no cached album info, look it up
+            if not album_key:
+                # Extract album path and username from URL
+                username, album_path = extract_album_info_from_url(url)
+                
+                if not username or not album_path:
+                    debug_info.append("Failed to parse URL - Using fallback method")
+                    album_path = get_path_from_url(url)
+                    username = auth_nickname  # Fall back to authenticated user
+                
+                debug_info.append(f"Album owner: {username}")
+                debug_info.append(f"Album path: {album_path}")
+                
+                # Get album info
+                debug_info.append(f"Looking up album...")
+                response = smugmug.get(
+                    f'https://api.smugmug.com/api/v2/user/{username}!urlpathlookup',
+                    params={'urlpath': album_path},
+                    headers={'Accept': 'application/json'}
+                )
+                
+                if response.status_code != 200:
+                    debug_info.append(f"Error looking up album - Status code: {response.status_code}")
+                    debug_info.append(f"Response: {response.text}")
+                    return jsonify({"error": "Failed to find album", "debug": debug_info})
+                
+                response_data = response.json()['Response']
+                debug_info.append(f"Response keys: {list(response_data.keys())}")
+                
+                # Check if we found an album
+                if 'Album' not in response_data:
+                    debug_info.append("No album found in response")
+                    return jsonify({"error": "Album not found", "debug": debug_info})
+                
+                album_data = response_data['Album']
+                album_key = album_data['AlbumKey']
+                album_name = album_data['Name']
+                album_url = album_data['WebUri']
+                debug_info.append(f"Found album: '{album_name}' with key: {album_key}")
             
             # Get images
             debug_info.append("Getting images from album...")
@@ -423,7 +623,8 @@ def process():
             
             response_data = response.json()['Response']
             images = response_data.get('AlbumImage', [])
-            debug_info.append(f"Found {len(images)} images in the album")
+            total_images = len(images)
+            debug_info.append(f"Found {total_images} images in the album")
             
             if not images:
                 if temp_file_path and os.path.exists(temp_file_path):
@@ -437,107 +638,44 @@ def process():
                     "success": True,
                     "message": "No images found in the album",
                     "totalImages": 0,
-                    "albumUrl": album_data['WebUri'],
+                    "albumUrl": album_url,
                     "debug": debug_info
                 })
             
-            # Process images in smaller batches with more time between batches
-            batch_size = 1  # Process one image at a time to avoid timeouts
+            # Process images in a small batch to avoid timeouts
+            # We will process max 2 images per batch
+            max_images_per_batch = 2
+            debug_info.append(f"Processing up to {max_images_per_batch} images per batch")
+            
+            # Initialize from existing state if available
             processed_images = []
             failed_images = []
+            processed_indices = []
             
-            debug_info.append(f"Processing images one at a time to avoid timeouts...")
+            if existing_state:
+                processed_images = existing_state.get('processed_images', [])
+                failed_images = existing_state.get('failed_images', [])
+                processed_indices = existing_state.get('processed_indices', [])
+                debug_info.append(f"Loaded {len(processed_images)} previously processed images from session")
             
-            # Only process the first N images to avoid timeout
-            max_images_per_request = min(4, len(images))
-            debug_info.append(f"Limiting to {max_images_per_request} images per request to avoid timeout")
+            # Process batch
+            new_processed, new_failed, updated_indices, next_index = process_images_batch(
+                smugmug, vision_client, album_key, images, 
+                start_index, max_images_per_batch, threshold,
+                existing_state
+            )
             
-            for i in range(0, max_images_per_request, batch_size):
-                batch = images[i:i+batch_size]
-                debug_info.append(f"Processing batch {i//batch_size + 1}/{(max_images_per_request-1)//batch_size + 1} ({len(batch)} images)")
-                
-                for image in batch:
-                    try:
-                        # Check if already tagged
-                        current_keywords = image.get('KeywordArray', [])
-                        if current_keywords and 'AutoTagged' in current_keywords:
-                            debug_info.append(f"Image {image.get('FileName', 'Unknown')} already tagged, skipping")
-                            continue
-                        
-                        # Get image URLs
-                        image_key = f"{image['ImageKey']}-0"
-                        image_url = image.get('ArchivedUri') or image.get('WebUri')
-                        thumbnail_url = image.get('ThumbnailUrl')
-                        
-                        if not image_url:
-                            debug_info.append(f"No image URL found for {image.get('FileName', 'Unknown')}, skipping")
-                            failed_images.append(image.get('FileName', 'Unknown'))
-                            continue
-                        
-                        # Get Vision AI tags
-                        debug_info.append(f"Getting Vision AI tags for {image.get('FileName', 'Unknown')}")
-                        vision_tags, confidence_scores = get_vision_tags(vision_client, image_url, threshold)
-                        
-                        if not vision_tags or len(vision_tags) <= 1:  # Only "AutoTagged" tag
-                            debug_info.append(f"No useful tags returned from Vision API for {image.get('FileName', 'Unknown')}, trying again with default tags")
-                            vision_tags = ['scotland', 'wilderness', 'outdoors', 'nature', 'landscape', 'AutoTagged']
-                        
-                        # Ensure current_keywords is a list
-                        if current_keywords is None:
-                            current_keywords = []
-                        elif isinstance(current_keywords, str):
-                            current_keywords = [current_keywords]
-                        
-                        # Filter out empty tags
-                        vision_tags = [tag for tag in vision_tags if tag.strip()]
-                        
-                        # Combine with existing tags
-                        all_tags = list(dict.fromkeys(current_keywords + vision_tags))
-                        debug_info.append(f"Combined {len(all_tags)} tags for {image.get('FileName', 'Unknown')}")
-                        
-                        # Update the image
-                        debug_info.append(f"Updating image {image_key}")
-                        update_data = {
-                            'KeywordArray': all_tags,
-                            'ShowKeywords': True
-                        }
-                        
-                        # Update base image
-                        base_response = smugmug.patch(
-                            f'https://api.smugmug.com/api/v2/image/{image_key}',
-                            headers={
-                                'Accept': 'application/json',
-                                'Content-Type': 'application/json'
-                            },
-                            json=update_data
-                        )
-                        
-                        if base_response.status_code != 200:
-                            debug_info.append(f"Error updating base image: {base_response.status_code}")
-                            error_text = base_response.text
-                            if len(error_text) > 500:
-                                error_text = error_text[:500] + "..."
-                            debug_info.append(f"Response: {error_text}")
-                            failed_images.append(image.get('FileName', 'Unknown'))
-                            continue
-                        
-                        # Success
-                        debug_info.append(f"Successfully tagged image {image.get('FileName', 'Unknown')}")
-                        processed_images.append({
-                            'filename': image.get('FileName', 'Unknown'),
-                            'keywords': all_tags,
-                            'thumbnailUrl': thumbnail_url
-                        })
-                        
-                    except Exception as e:
-                        error_trace = traceback.format_exc()
-                        debug_info.append(f"Error processing image: {str(e)}")
-                        debug_info.append(f"Error trace: {error_trace}")
-                        failed_images.append(image.get('FileName', 'Unknown'))
-                
-                # Longer pause between batches to allow memory cleanup and avoid timeouts
-                # This is crucial to avoid worker timeouts
-                time.sleep(5)
+            # Combine results
+            processed_images.extend(new_processed)
+            failed_images.extend(new_failed)
+            processed_indices.extend(updated_indices)
+            
+            # Save progress
+            state = save_progress(
+                session_id, album_key, album_name, album_url, 
+                total_images, processed_indices, processed_images, 
+                failed_images, next_index
+            )
             
             # Clean up temp file
             if temp_file_path and os.path.exists(temp_file_path):
@@ -547,21 +685,32 @@ def process():
                 except Exception as e:
                     debug_info.append(f"Error removing temp file: {str(e)}")
             
-            remaining_images = len(images) - max_images_per_request
-            message = f"Processing complete: {len(processed_images)} images tagged successfully, {len(failed_images)} failed"
-            if remaining_images > 0:
-                message += f". Note: {remaining_images} images were skipped to avoid timeout. Consider processing the album in multiple batches."
+            # Calculate progress information
+            remaining_images = total_images - len(processed_indices)
+            
+            # Create message
+            if next_index == -1:
+                # All images processed
+                message = f"Processing complete! {len(processed_images)} images tagged successfully, {len(failed_images)} failed."
+            else:
+                # More images to process
+                message = f"Processed {len(processed_indices)} of {total_images} images so far ({len(processed_indices) / total_images * 100:.1f}%). "
+                message += f"Click 'Continue Processing' to tag more images."
             
             return jsonify({
                 "success": True,
                 "message": message,
                 "processedImages": processed_images,
                 "failedImages": failed_images,
-                "totalImages": len(images),
-                "processedCount": len(processed_images),
+                "totalImages": total_images,
+                "processedCount": len(processed_indices),
                 "failedCount": len(failed_images),
-                "skippedCount": remaining_images,
-                "albumUrl": album_data['WebUri'],
+                "remainingCount": remaining_images,
+                "nextIndex": next_index,
+                "sessionId": session_id,
+                "albumUrl": album_url,
+                "albumName": album_name,
+                "isComplete": next_index == -1,
                 "debug": debug_info
             })
             
@@ -594,6 +743,57 @@ def process():
                 debug_info.append(f"Error removing temp file: {str(clean_e)}")
                 
         return jsonify({"error": str(e), "debug": debug_info})
+
+@app.route('/sessions', methods=['GET'])
+def list_sessions():
+    """List active processing sessions"""
+    sessions = []
+    
+    for session_id, data in PROCESS_STATE.items():
+        sessions.append({
+            'id': session_id,
+            'albumName': data.get('album_name', 'Unknown Album'),
+            'totalImages': data.get('total_images', 0),
+            'processed': len(data.get('processed_indices', [])),
+            'lastUpdated': data.get('last_updated', ''),
+            'nextIndex': data.get('next_index', -1),
+            'isComplete': data.get('next_index', -1) == -1
+        })
+    
+    # Sort by last updated, newest first
+    sessions.sort(key=lambda x: x.get('lastUpdated', ''), reverse=True)
+    
+    return jsonify(sessions)
+
+@app.route('/session/<session_id>', methods=['GET'])
+def get_session(session_id):
+    """Get details for a specific session"""
+    session_data = load_progress(session_id)
+    
+    if not session_data:
+        return jsonify({"error": "Session not found"}), 404
+        
+    return jsonify({
+        'id': session_id,
+        'albumName': session_data.get('album_name', 'Unknown Album'),
+        'albumUrl': session_data.get('album_url', ''),
+        'totalImages': session_data.get('total_images', 0),
+        'processed': len(session_data.get('processed_indices', [])),
+        'processedImages': session_data.get('processed_images', []),
+        'failedImages': session_data.get('failed_images', []),
+        'lastUpdated': session_data.get('last_updated', ''),
+        'nextIndex': session_data.get('next_index', -1),
+        'isComplete': session_data.get('next_index', -1) == -1
+    })
+
+@app.route('/clear-session/<session_id>', methods=['POST'])
+def clear_session(session_id):
+    """Clear a specific session"""
+    if session_id in PROCESS_STATE:
+        del PROCESS_STATE[session_id]
+        return jsonify({"success": True, "message": "Session cleared"})
+    
+    return jsonify({"error": "Session not found"}), 404
 
 @app.route('/test-credentials')
 def test_credentials():
@@ -724,3 +924,4 @@ def diagnostic():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
+EOF
