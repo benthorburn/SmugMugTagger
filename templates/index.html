@@ -10,17 +10,23 @@
             margin: 0 auto;
             padding: 20px;
             line-height: 1.6;
+            background-color: #242224;
+            color: #f0f0f0;
         }
-        h1 {
-            color: #333;
+        .logo-container {
             text-align: center;
+            margin-bottom: 20px;
+        }
+        .logo {
+            max-width: 100%;
+            height: auto;
         }
         .form-container {
-            background-color: #f9f9f9;
+            background-color: #333;
             border-radius: 8px;
             padding: 20px;
             margin-bottom: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
         }
         .form-group {
             margin-bottom: 15px;
@@ -33,9 +39,11 @@
         input[type="text"], input[type="number"] {
             width: 100%;
             padding: 10px;
-            border: 1px solid #ddd;
+            border: 1px solid #444;
             border-radius: 4px;
             font-size: 16px;
+            background-color: #222;
+            color: #f0f0f0;
         }
         button {
             background-color: #4CAF50;
@@ -53,13 +61,13 @@
         #result {
             margin-top: 20px;
             padding: 20px;
-            border: 1px solid #ddd;
+            border: 1px solid #444;
             border-radius: 8px;
-            background-color: #fff;
+            background-color: #333;
             display: none;
         }
         .loader {
-            border: 6px solid #f3f3f3;
+            border: 6px solid #444;
             border-top: 6px solid #3498db;
             border-radius: 50%;
             width: 40px;
@@ -75,10 +83,10 @@
         .tag-list {
             max-height: 300px;
             overflow-y: auto;
-            border: 1px solid #eee;
+            border: 1px solid #444;
             padding: 10px;
             margin-top: 10px;
-            background-color: #f9f9f9;
+            background-color: #2a2a2a;
         }
         .alert {
             padding: 15px;
@@ -86,25 +94,30 @@
             border-radius: 4px;
         }
         .alert-success {
-            background-color: #dff0d8;
-            color: #3c763d;
+            background-color: #2a4a2d;
+            color: #9fd9a0;
         }
         .alert-danger {
-            background-color: #f2dede;
-            color: #a94442;
+            background-color: #4a2a2a;
+            color: #d99f9f;
+        }
+        .alert-warning {
+            background-color: #4a472a;
+            color: #d9d09f;
         }
         .footer {
             margin-top: 30px;
             text-align: center;
-            color: #777;
+            color: #999;
             font-size: 14px;
         }
         pre {
-            background-color: #f5f5f5;
+            background-color: #333;
             padding: 10px;
             border-radius: 4px;
             overflow-x: auto;
             font-size: 12px;
+            color: #ccc;
         }
         .debug-toggle {
             color: #999;
@@ -116,7 +129,7 @@
             display: none;
             margin-top: 20px;
         }
-        /* New styles for image thumbnails */
+        /* Styles for image thumbnails */
         .image-container {
             display: flex;
             flex-wrap: wrap;
@@ -125,16 +138,16 @@
         }
         .image-card {
             width: calc(50% - 15px);
-            border: 1px solid #ddd;
+            border: 1px solid #444;
             border-radius: 5px;
             overflow: hidden;
-            background-color: #fff;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            background-color: #333;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
         }
         .image-header {
             padding: 10px;
-            background-color: #f5f5f5;
-            border-bottom: 1px solid #ddd;
+            background-color: #3a3a3a;
+            border-bottom: 1px solid #444;
             font-weight: bold;
             white-space: nowrap;
             overflow: hidden;
@@ -154,11 +167,12 @@
         }
         .tag {
             display: inline-block;
-            background-color: #e9f5ff;
+            background-color: #2c3e50;
             border-radius: 3px;
             padding: 2px 5px;
             margin: 2px;
             font-size: 11px;
+            color: #ecf0f1;
         }
         @media (max-width: 600px) {
             .image-card {
@@ -168,7 +182,7 @@
         .progress-container {
             margin-top: 15px;
             margin-bottom: 15px;
-            background-color: #f5f5f5;
+            background-color: #333;
             border-radius: 4px;
             padding: 10px;
         }
@@ -179,7 +193,7 @@
         }
         .progress-bar {
             height: 20px;
-            background-color: #e0e0e0;
+            background-color: #444;
             border-radius: 4px;
             overflow: hidden;
         }
@@ -189,10 +203,33 @@
             width: 0%;
             transition: width 0.3s ease;
         }
+        a {
+            color: #4CAF50;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        .btn-primary {
+            display: inline-block;
+            padding: 8px 16px;
+            background-color: #4CAF50;
+            color: white;
+            border-radius: 4px;
+            text-decoration: none;
+            margin-top: 10px;
+        }
+        .btn-primary:hover {
+            background-color: #45a049;
+            text-decoration: none;
+        }
     </style>
 </head>
 <body>
-    <h1>SmugMug Auto Tagger</h1>
+    <div class="logo-container">
+        <img src="https://raw.githubusercontent.com/BenThorburn/smugmugtagger/main/static/logo.png" alt="SmugMug Auto Tagger" class="logo">
+    </div>
+    
     <div class="form-container">
         <p>This tool automatically tags your SmugMug album images using Google Vision AI.</p>
         
@@ -284,7 +321,7 @@
                         </div>`;
                         
                     if (data.albumUrl) {
-                        resultHtml += `<p><a href="${data.albumUrl}" target="_blank" class="btn btn-primary">View Album on SmugMug</a></p>`;
+                        resultHtml += `<p><a href="${data.albumUrl}" target="_blank" class="btn-primary">View Album on SmugMug</a></p>`;
                     }
                     
                     if (data.processedImages && data.processedImages.length > 0) {
@@ -295,7 +332,7 @@
                             resultHtml += `
                                 <div class="image-card">
                                     <div class="image-header">${img.filename}</div>
-                                    ${img.thumbnailUrl ? `<img src="${img.thumbnailUrl}" alt="${img.filename}" class="image-thumbnail">` : '<div class="image-thumbnail" style="background-color: #eee; display: flex; align-items: center; justify-content: center;">No thumbnail</div>'}
+                                    ${img.thumbnailUrl ? `<img src="${img.thumbnailUrl}" alt="${img.filename}" class="image-thumbnail">` : '<div class="image-thumbnail" style="background-color: #444; display: flex; align-items: center; justify-content: center;">No thumbnail</div>'}
                                     <div class="image-tags">`;
                             
                             // Display tags
