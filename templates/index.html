@@ -58,6 +58,10 @@
         button:hover {
             background-color: #45a049;
         }
+        button:disabled {
+            background-color: #666;
+            cursor: not-allowed;
+        }
         #result {
             margin-top: 20px;
             padding: 20px;
@@ -223,6 +227,74 @@
             background-color: #45a049;
             text-decoration: none;
         }
+        .session-card {
+            background-color: #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+            border: 1px solid #444;
+        }
+        .session-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .session-title {
+            font-size: 18px;
+            font-weight: bold;
+        }
+        .session-actions {
+            display: flex;
+            gap: 10px;
+        }
+        .btn-sm {
+            padding: 5px 10px;
+            font-size: 14px;
+        }
+        .btn-secondary {
+            background-color: #6c757d;
+        }
+        .btn-danger {
+            background-color: #dc3545;
+        }
+        .session-progress {
+            margin-top: 10px;
+        }
+        .action-row {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+        .action-row button {
+            flex: 1;
+        }
+        .tab-container {
+            margin-bottom: 20px;
+        }
+        .tab-buttons {
+            display: flex;
+            border-bottom: 1px solid #444;
+        }
+        .tab-button {
+            padding: 10px 15px;
+            background-color: #333;
+            border: none;
+            border-bottom: 2px solid transparent;
+            color: #ccc;
+            cursor: pointer;
+        }
+        .tab-button.active {
+            border-bottom: 2px solid #4CAF50;
+            color: #fff;
+        }
+        .tab-content {
+            display: none;
+            padding: 15px 0;
+        }
+        .tab-content.active {
+            display: block;
+        }
     </style>
 </head>
 <body>
@@ -230,23 +302,50 @@
         <img src="https://raw.githubusercontent.com/BenThorburn/smugmugtagger/main/static/logo.png" alt="SmugMug Auto Tagger" class="logo">
     </div>
     
-    <div class="form-container">
-        <p>This tool automatically tags your SmugMug album images using Google Vision AI.</p>
+    <div class="tab-container">
+        <div class="tab-buttons">
+            <button class="tab-button active" onclick="openTab(event, 'newProcessTab')">New Processing</button>
+            <button class="tab-button" onclick="openTab(event, 'activeSessionsTab')">Active Sessions</button>
+        </div>
         
-        <form id="tagForm">
-            <div class="form-group">
-                <label for="album_url">SmugMug Album URL:</label>
-                <input type="text" id="album_url" name="album_url" required 
-                       placeholder="https://yourusername.smugmug.com/your-album">
+        <div id="newProcessTab" class="tab-content active">
+            <div class="form-container">
+                <p>This tool automatically tags your SmugMug album images using Google Vision AI.</p>
+                
+                <form id="tagForm">
+                    <div class="form-group">
+                        <label for="album_url">SmugMug Album URL:</label>
+                        <input type="text" id="album_url" name="album_url" required 
+                               placeholder="https://yourusername.smugmug.com/your-album">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="threshold">Confidence Threshold (%):</label>
+                        <input type="number" id="threshold" name="threshold" value="30" min="1" max="100">
+                    </div>
+                    
+                    <input type="hidden" id="start_index" name="start_index" value="0">
+                    <input type="hidden" id="session_id" name="session_id" value="">
+                    
+                    <button type="submit" id="submitButton">Process Album</button>
+                </form>
             </div>
-            
-            <div class="form-group">
-                <label for="threshold">Confidence Threshold (%):</label>
-                <input type="number" id="threshold" name="threshold" value="30" min="1" max="100">
+        </div>
+        
+        <div id="activeSessionsTab" class="tab-content">
+            <div class="form-container">
+                <h3>Active Processing Sessions</h3>
+                <p>Continue processing albums that were interrupted.</p>
+                
+                <div id="sessionsList">
+                    <p>Loading sessions...</p>
+                </div>
+                
+                <div class="action-row">
+                    <button onclick="refreshSessions()">Refresh Sessions</button>
+                </div>
             </div>
-            
-            <button type="submit" id="submitButton">Process Album</button>
-        </form>
+        </div>
     </div>
     
     <div class="loader" id="loader"></div>
@@ -259,11 +358,216 @@
     </div>
     
     <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            loadSessions();
+        });
+        
+        function openTab(evt, tabName) {
+            // Hide all tab content
+            var tabcontent = document.getElementsByClassName("tab-content");
+            for (var i = 0; i < tabcontent.length; i++) {
+                tabcontent[i].classList.remove("active");
+            }
+            
+            // Remove active class from all tab buttons
+            var tabbuttons = document.getElementsByClassName("tab-button");
+            for (var i = 0; i < tabbuttons.length; i++) {
+                tabbuttons[i].classList.remove("active");
+            }
+            
+            // Show the specific tab content
+            document.getElementById(tabName).classList.add("active");
+            
+            // Add active class to the button that opened the tab
+            evt.currentTarget.classList.add("active");
+            
+            // If opening active sessions tab, refresh the data
+            if (tabName === "activeSessionsTab") {
+                loadSessions();
+            }
+        }
+        
+        function loadSessions() {
+            fetch('/sessions')
+                .then(response => response.json())
+                .then(sessions => {
+                    const sessionsList = document.getElementById('sessionsList');
+                    
+                    if (sessions.length === 0) {
+                        sessionsList.innerHTML = '<p>No active sessions found.</p>';
+                        return;
+                    }
+                    
+                    let html = '';
+                    sessions.forEach(session => {
+                        const progressPercent = (session.processed / session.totalImages) * 100;
+                        
+                        html += `
+                            <div class="session-card">
+                                <div class="session-header">
+                                    <div class="session-title">${session.albumName}</div>
+                                    <div class="session-actions">
+                                        <button class="btn-sm btn-secondary" onclick="viewSession('${session.id}')">View</button>
+                                        <button class="btn-sm btn-danger" onclick="clearSession('${session.id}')">Clear</button>
+                                    </div>
+                                </div>
+                                <div>Progress: ${session.processed} of ${session.totalImages} images</div>
+                                <div class="session-progress">
+                                    <div class="progress-bar">
+                                        <div class="progress-fill" style="width: ${progressPercent}%"></div>
+                                    </div>
+                                </div>
+                                <div style="margin-top: 10px;">
+                                    <button onclick="continueProcessing('${session.id}', ${session.nextIndex})" 
+                                            ${session.isComplete ? 'disabled' : ''}>
+                                        ${session.isComplete ? 'Processing Complete' : 'Continue Processing'}
+                                    </button>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    
+                    sessionsList.innerHTML = html;
+                })
+                .catch(error => {
+                    document.getElementById('sessionsList').innerHTML = `<p>Error loading sessions: ${error.message}</p>`;
+                });
+        }
+        
+        function refreshSessions() {
+            loadSessions();
+        }
+        
+        function viewSession(sessionId) {
+            fetch(`/session/${sessionId}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        alert(data.error);
+                        return;
+                    }
+                    
+                    let resultHtml = `
+                        <h2>${data.albumName}</h2>
+                        <div class="alert alert-success">
+                            <p>Session Status: ${data.isComplete ? 'Complete' : 'In Progress'}</p>
+                            <p>Total Images: ${data.totalImages}</p>
+                            <p>Images Processed: ${data.processed}</p>
+                        </div>
+                    `;
+                    
+                    // Add progress bar
+                    const progressPercent = (data.processed / data.totalImages) * 100;
+                    resultHtml += `
+                        <div class="progress-container">
+                            <div class="progress-text">
+                                <span>Processing Progress:</span>
+                                <span>${data.processed} of ${data.totalImages} images (${progressPercent.toFixed(1)}%)</span>
+                            </div>
+                            <div class="progress-bar">
+                                <div class="progress-fill" style="width: ${progressPercent}%"></div>
+                            </div>
+                        </div>
+                    `;
+                    
+                    if (data.albumUrl) {
+                        resultHtml += `<p><a href="${data.albumUrl}" target="_blank" class="btn-primary">View Album on SmugMug</a></p>`;
+                    }
+                    
+                    if (!data.isComplete) {
+                        resultHtml += `
+                            <div class="action-row">
+                                <button onclick="continueProcessing('${sessionId}', ${data.nextIndex})">Continue Processing</button>
+                            </div>
+                        `;
+                    }
+                    
+                    if (data.processedImages && data.processedImages.length > 0) {
+                        resultHtml += '<h3>Processed Images:</h3>';
+                        resultHtml += '<div class="image-container">';
+                        
+                        data.processedImages.forEach(img => {
+                            resultHtml += `
+                                <div class="image-card">
+                                    <div class="image-header">${img.filename}</div>
+                                    ${img.thumbnailUrl ? `<img src="${img.thumbnailUrl}" alt="${img.filename}" class="image-thumbnail">` : '<div class="image-thumbnail" style="background-color: #444; display: flex; align-items: center; justify-content: center;">No thumbnail</div>'}
+                                    <div class="image-tags">`;
+                            
+                            // Display tags
+                            const tagsToShow = img.keywords.filter(tag => tag !== 'AutoTagged');
+                            tagsToShow.forEach(tag => {
+                                resultHtml += `<span class="tag">${tag}</span>`;
+                            });
+                            
+                            resultHtml += `
+                                    </div>
+                                </div>`;
+                        });
+                        
+                        resultHtml += '</div>';
+                    }
+                    
+                    if (data.failedImages && data.failedImages.length > 0) {
+                        resultHtml += `
+                            <h3>Failed Images:</h3>
+                            <div class="alert alert-danger">
+                                <ul>
+                                    ${data.failedImages.map(img => `<li>${img}</li>`).join('')}
+                                </ul>
+                            </div>`;
+                    }
+                    
+                    document.getElementById('result').innerHTML = resultHtml;
+                    document.getElementById('result').style.display = 'block';
+                    
+                    // Switch to the appropriate tab
+                    const tabEvent = { currentTarget: document.querySelector('.tab-button[onclick*="newProcessTab"]') };
+                    openTab(tabEvent, 'newProcessTab');
+                })
+                .catch(error => {
+                    alert(`Error viewing session: ${error.message}`);
+                });
+        }
+        
+        function clearSession(sessionId) {
+            if (!confirm('Are you sure you want to clear this session? This cannot be undone.')) {
+                return;
+            }
+            
+            fetch(`/clear-session/${sessionId}`, { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        alert(data.error);
+                    } else {
+                        loadSessions();
+                    }
+                })
+                .catch(error => {
+                    alert(`Error clearing session: ${error.message}`);
+                });
+        }
+        
+        function continueProcessing(sessionId, nextIndex) {
+            // Set form values to continue processing this session
+            document.getElementById('session_id').value = sessionId;
+            document.getElementById('start_index').value = nextIndex;
+            
+            // Submit the form
+            document.getElementById('tagForm').dispatchEvent(new Event('submit'));
+            
+            // Switch to the appropriate tab
+            const tabEvent = { currentTarget: document.querySelector('.tab-button[onclick*="newProcessTab"]') };
+            openTab(tabEvent, 'newProcessTab');
+        }
+        
         document.getElementById('tagForm').addEventListener('submit', function(e) {
             e.preventDefault();
             
             const albumUrl = document.getElementById('album_url').value;
             const threshold = document.getElementById('threshold').value;
+            const startIndex = document.getElementById('start_index').value;
+            const sessionId = document.getElementById('session_id').value;
             
             // Disable submit button and show loader
             document.getElementById('submitButton').disabled = true;
@@ -271,12 +575,17 @@
             document.getElementById('loader').style.display = 'block';
             document.getElementById('result').style.display = 'none';
             
+            const formData = new FormData();
+            formData.append('album_url', albumUrl);
+            formData.append('threshold', threshold);
+            formData.append('start_index', startIndex);
+            if (sessionId) {
+                formData.append('session_id', sessionId);
+            }
+            
             fetch('/process', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                body: `album_url=${encodeURIComponent(albumUrl)}&threshold=${threshold}`
+                body: formData
             })
             .then(response => response.json())
             .then(data => {
@@ -294,7 +603,7 @@
                         </div>`;
                 } else {
                     resultHtml += `
-                        <h2>Processing Results</h2>
+                        <h2>${data.albumName || 'Processing Results'}</h2>
                         <div class="alert alert-success">`;
                         
                     if (data.message) {
@@ -305,7 +614,6 @@
                     const totalImages = data.totalImages || 0;
                     const processedCount = data.processedCount || 0;
                     const failedCount = data.failedCount || 0;
-                    const skippedCount = data.skippedCount || 0;
                     const progressPercent = totalImages > 0 ? Math.round((processedCount / totalImages) * 100) : 0;
                     
                     resultHtml += `
@@ -319,6 +627,17 @@
                                 <div class="progress-fill" style="width: ${progressPercent}%"></div>
                             </div>
                         </div>`;
+                    
+                    // Continue processing button if more images remain
+                    if (data.nextIndex !== -1) {
+                        resultHtml += `
+                            <div class="action-row">
+                                <button onclick="continueProcessing('${data.sessionId}', ${data.nextIndex})">
+                                    Continue Processing
+                                </button>
+                            </div>
+                        `;
+                    }
                         
                     if (data.albumUrl) {
                         resultHtml += `<p><a href="${data.albumUrl}" target="_blank" class="btn-primary">View Album on SmugMug</a></p>`;
@@ -349,11 +668,11 @@
                         resultHtml += '</div>';
                     }
                     
-                    if (skippedCount > 0) {
+                    if (data.remainingCount > 0) {
                         resultHtml += `
                             <div class="alert alert-warning" style="margin-top: 20px;">
-                                <strong>Note:</strong> ${skippedCount} images were skipped to prevent timeout. 
-                                Run the process again to tag more images.
+                                <strong>Note:</strong> ${data.remainingCount} images still need to be processed. 
+                                Click "Continue Processing" to tag more images.
                             </div>`;
                     }
                     
@@ -379,6 +698,15 @@
                 }
                 
                 document.getElementById('result').innerHTML = resultHtml;
+                
+                // Reset form state
+                document.getElementById('start_index').value = "0";
+                document.getElementById('session_id').value = "";
+                
+                // Update sessions list if we're in that tab
+                if (document.getElementById('activeSessionsTab').classList.contains('active')) {
+                    loadSessions();
+                }
             })
             .catch(error => {
                 document.getElementById('loader').style.display = 'none';
@@ -389,6 +717,10 @@
                     <div class="alert alert-danger">
                         <strong>Error:</strong> ${error.message}
                     </div>`;
+                
+                // Reset form state
+                document.getElementById('start_index').value = "0";
+                document.getElementById('session_id').value = "";
             });
         });
         
@@ -407,3 +739,4 @@
     </script>
 </body>
 </html>
+EOF
