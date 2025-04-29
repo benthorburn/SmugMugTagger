@@ -30,7 +30,7 @@ def get_path_from_url(url):
     return path.rstrip('/')
 
 def get_vision_tags(vision_client, image_url, threshold=30):
-    """Get essential tags using Vision API features - memory optimized"""
+    """Get comprehensive tags using multiple Vision API features with enhanced sensitivity"""
     logger.debug(f"Starting Vision analysis on: {image_url}")
     vision_image = vision.Image()
     vision_image.source.image_uri = image_url
@@ -39,21 +39,12 @@ def get_vision_tags(vision_client, image_url, threshold=30):
     confidence_scores = {}
     
     try:
-        # 1. Label Detection (core feature - most important)
-        logger.debug("Analyzing general content...")
-        label_response = vision_client.label_detection(image=vision_image)
-        logger.debug(f"Label detection response: {label_response}")
-        for label in label_response.label_annotations:
-            if label.score * 100 >= threshold:
-                label_lower = label.description.lower()
-                all_tags.add(label_lower)
-                confidence_scores[label_lower] = f"{label.score * 100:.1f}%"
-        
-        # 2. Landmark Detection (helpful for Scotland-specific tags)
-        logger.debug("Detecting landmarks...")
+        # 1. Landmark Detection with lower threshold specifically for landmarks
+        logger.debug("Detecting landmarks (with higher sensitivity)...")
         landmark_response = vision_client.landmark_detection(image=vision_image)
         for landmark in landmark_response.landmark_annotations:
-            if landmark.score * 100 >= threshold:
+            # Lower threshold just for landmarks (15% confidence instead of 30%)
+            if landmark.score * 100 >= 15:
                 landmark_name = landmark.description.lower()
                 all_tags.add(landmark_name)
                 confidence_scores[landmark_name] = f"{landmark.score * 100:.1f}%"
@@ -68,16 +59,112 @@ def get_vision_tags(vision_client, image_url, threshold=30):
                             all_tags.add('scotland')
                             if lat > 58:  # Northern Scotland
                                 all_tags.add('northern scotland')
+                                if lng < -4:  # Northwest
+                                    all_tags.add('northwest highlands')
+                                    all_tags.add('west coast')
+                                elif lng > -3:  # Northeast
+                                    all_tags.add('northeast scotland')
+                                    all_tags.add('east coast')
                             elif 57 < lat < 58:  # Central Scotland
                                 all_tags.add('central scotland')
+                            if lng < -5:  # Western Scotland
+                                all_tags.add('western scotland')
+                            elif lng > -3:  # Eastern Scotland
+                                all_tags.add('eastern scotland')
         
-        # 3. Face Detection (just for people detection - minimal memory)
+        # 2. Web Detection for better landmark recognition
+        logger.debug("Running web detection for better landmark recognition...")
+        web_response = vision_client.web_detection(image=vision_image)
+        
+        if web_response.web_detection:
+            # Best guess labels often identify landmarks better
+            for label in web_response.web_detection.best_guess_labels:
+                label_lower = label.label.lower()
+                all_tags.add(label_lower)
+                confidence_scores[f"web_{label_lower}"] = "web match"
+            
+            # Web entities with lower threshold
+            for entity in web_response.web_detection.web_entities:
+                if entity.score >= 0.15:  # 15% threshold for web entities
+                    entity_lower = entity.description.lower()
+                    all_tags.add(entity_lower)
+                    confidence_scores[f"web_{entity_lower}"] = f"{entity.score * 100:.1f}%"
+            
+            # Also get entities from visually similar images
+            if web_response.web_detection.pages_with_matching_images:
+                for page in web_response.web_detection.pages_with_matching_images:
+                    if page.page_title:
+                        # Extract potential landmark names from page titles
+                        title_words = page.page_title.lower().split()
+                        
+                        # Look for potential landmark indicators
+                        landmark_indicators = ['castle', 'lighthouse', 'point', 'isle', 'loch', 'ben', 'hill', 
+                                              'mountain', 'stacks', 'bridge', 'monument', 'falls', 'glen']
+                        
+                        for indicator in landmark_indicators:
+                            if indicator in page.page_title.lower():
+                                # Extract the full phrase containing the indicator
+                                title_lower = page.page_title.lower()
+                                start = max(0, title_lower.find(indicator) - 20)
+                                end = min(len(title_lower), title_lower.find(indicator) + len(indicator) + 20)
+                                potential_landmark = title_lower[start:end].strip()
+                                
+                                # Clean up the potential landmark name
+                                for char in [',', '|', '-', ':', '(', ')', '.']:
+                                    potential_landmark = potential_landmark.replace(char, ' ')
+                                
+                                words = potential_landmark.split()
+                                if len(words) > 1 and len(words) < 6:  # Avoid single words or too long phrases
+                                    potential_landmark = ' '.join(words)
+                                    all_tags.add(potential_landmark)
+                                    confidence_scores[f"web_match_{potential_landmark}"] = "web page match"
+                                    
+                                    # Also add the simple landmark name
+                                    # Find word containing landmark indicator
+                                    for word in words:
+                                        if indicator in word:
+                                            idx = words.index(word)
+                                            # Get previous word + indicator word if available
+                                            if idx > 0:
+                                                landmark_name = words[idx-1] + ' ' + word
+                                                all_tags.add(landmark_name)
+                                                confidence_scores[f"extracted_{landmark_name}"] = "extracted from web"
+        
+        # 3. Label Detection (general objects, scenes, activities)
+        logger.debug("Analyzing general content...")
+        label_response = vision_client.label_detection(image=vision_image)
+        for label in label_response.label_annotations:
+            if label.score * 100 >= threshold:
+                label_lower = label.description.lower()
+                all_tags.add(label_lower)
+                confidence_scores[label_lower] = f"{label.score * 100:.1f}%"
+        
+        # 4. Object Detection
+        logger.debug("Detecting specific objects...")
+        object_response = vision_client.object_localization(image=vision_image)
+        for obj in object_response.localized_object_annotations:
+            if obj.score * 100 >= threshold:
+                obj_name = obj.name.lower()
+                all_tags.add(obj_name)
+                confidence_scores[obj_name] = f"{obj.score * 100:.1f}%"
+        
+        # 5. Face Detection
         logger.debug("Detecting people...")
         face_response = vision_client.face_detection(image=vision_image)
         if face_response.face_annotations:
             all_tags.add('people')
             if len(face_response.face_annotations) > 1:
                 all_tags.add('group photo')
+            
+            # Check for activity context
+            if any(activity in all_tags for activity in ['kayak', 'boat', 'hiking', 'mountain']):
+                all_tags.add('outdoor activity')
+                
+                if 'kayak' in all_tags or 'boat' in all_tags:
+                    all_tags.add('water activity')
+                
+                if 'hiking' in all_tags or 'mountain' in all_tags:
+                    all_tags.add('hiking')
         
         # Add AutoTagged marker
         all_tags.add('AutoTagged')
