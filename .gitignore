@@ -1,0 +1,6 @@
+# Ignore sensitive files
+credentials/
+config/
+*.log
+__pycache__/
+.DS_Store

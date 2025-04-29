@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SmugMug Auto Tagger</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .form-container {
+            background-color: #f9f9f9;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input[type="text"], input[type="number"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 16px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        #result {
+            margin-top: 20px;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            background-color: #fff;
+            display: none;
+        }
+        .loader {
+            border: 6px solid #f3f3f3;
+            border-top: 6px solid #3498db;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 2s linear infinite;
+            margin: 20px auto;
+            display: none;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .tag-list {
+            max-height: 300px;
+            overflow-y: auto;
+            border: 1px solid #eee;
+            padding: 10px;
+            margin-top: 10px;
+            background-color: #f9f9f9;
+        }
+        .alert {
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .alert-success {
+            background-color: #dff0d8;
+            color: #3c763d;
+        }
+        .alert-danger {
+            background-color: #f2dede;
+            color: #a94442;
+        }
+        .footer {
+            margin-top: 30px;
+            text-align: center;
+            color: #777;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <h1>SmugMug Auto Tagger</h1>
+    <div class="form-container">
+        <p>This tool automatically tags your SmugMug album images using Google Vision AI.</p>
+        
+        <form id="tagForm">
+            <div class="form-group">
+                <label for="album_url">SmugMug Album URL:</label>
+                <input type="text" id="album_url" name="album_url" required 
+                       placeholder="https://yourusername.smugmug.com/your-album">
+            </div>
+            
+            <div class="form-group">
+                <label for="threshold">Confidence Threshold (%):</label>
+                <input type="number" id="threshold" name="threshold" value="30" min="1" max="100">
+            </div>
+            
+            <button type="submit">Process Album</button>
+        </form>
+    </div>
+    
+    <div class="loader" id="loader"></div>
+    
+    <div id="result"></div>
+    
+    <div class="footer">
+        <p>Powered by Google Cloud Vision AI and SmugMug API</p>
+    </div>
+    
+    <script>
+        document.getElementById('tagForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const albumUrl = document.getElementById('album_url').value;
+            const threshold = document.getElementById('threshold').value;
+            
+            document.getElementById('loader').style.display = 'block';
+            document.getElementById('result').style.display = 'none';
+            
+            fetch('/process', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `album_url=${encodeURIComponent(albumUrl)}&threshold=${threshold}`
+            })
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('loader').style.display = 'none';
+                document.getElementById('result').style.display = 'block';
+                
+                if (data.error) {
+                    document.getElementById('result').innerHTML = `
+                        <div class="alert alert-danger">
+                            <strong>Error:</strong> ${data.error}
+                        </div>`;
+                } else {
+                    let resultHtml = `
+                        <h2>Processing Results</h2>
+                        <div class="alert alert-success">
+                            <p><strong>Total Images:</strong> ${data.totalImages}</p>
+                            <p><strong>Successfully Processed:</strong> ${data.successfullyProcessed}</p>
+                            <p><strong>Failed:</strong> ${data.failed}</p>
+                        </div>
+                        <p><a href="${data.albumUrl}" target="_blank">View Album on SmugMug</a></p>
+                    `;
+                    
+                    if (data.processedImages && data.processedImages.length > 0) {
+                        resultHtml += '<h3>Processed Images:</h3>';
+                        
+                        data.processedImages.forEach(img => {
+                            resultHtml += `
+                                <div style="margin-bottom: 15px; padding-bottom: 15px; border-bottom: 1px solid #eee;">
+                                    <p><strong>${img.filename}</strong></p>
+                                    ${img.thumbnailUrl ? `<img src="${img.thumbnailUrl}" alt="${img.filename}" style="max-width: 150px; margin-bottom: 10px;">` : ''}
+                                    <div class="tag-list">
+                                        ${img.keywords.join(', ')}
+                                    </div>
+                                </div>`;
+                        });
+                    }
+                    
+                    if (data.failedImages && data.failedImages.length > 0) {
+                        resultHtml += `
+                            <h3>Failed Images:</h3>
+                            <div class="alert alert-danger">
+                                <ul>
+                                    ${data.failedImages.map(img => `<li>${img}</li>`).join('')}
+                                </ul>
+                            </div>`;
+                    }
+                    
+                    document.getElementById('result').innerHTML = resultHtml;
+                }
+            })
+            .catch(error => {
+                document.getElementById('loader').style.display = 'none';
+                document.getElementById('result').style.display = 'block';
+                document.getElementById('result').innerHTML = `
+                    <div class="alert alert-danger">
+                        <strong>Error:</strong> ${error.message}
+                    </div>`;
+            });
+        });
+    </script>
+</body>
+</html>
