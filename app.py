@@ -30,7 +30,7 @@ def get_path_from_url(url):
     return path.rstrip('/')
 
 def get_vision_tags(vision_client, image_url, threshold=30):
-    """Get comprehensive tags using multiple Vision API features"""
+    """Get essential tags using Vision API features - memory optimized"""
     logger.debug(f"Starting Vision analysis on: {image_url}")
     vision_image = vision.Image()
     vision_image.source.image_uri = image_url
@@ -39,7 +39,7 @@ def get_vision_tags(vision_client, image_url, threshold=30):
     confidence_scores = {}
     
     try:
-        # 1. Label Detection (general objects, scenes, activities)
+        # 1. Label Detection (core feature - most important)
         logger.debug("Analyzing general content...")
         label_response = vision_client.label_detection(image=vision_image)
         logger.debug(f"Label detection response: {label_response}")
@@ -49,16 +49,7 @@ def get_vision_tags(vision_client, image_url, threshold=30):
                 all_tags.add(label_lower)
                 confidence_scores[label_lower] = f"{label.score * 100:.1f}%"
         
-        # 2. Object Detection
-        logger.debug("Detecting specific objects...")
-        object_response = vision_client.object_localization(image=vision_image)
-        for obj in object_response.localized_object_annotations:
-            if obj.score * 100 >= threshold:
-                obj_name = obj.name.lower()
-                all_tags.add(obj_name)
-                confidence_scores[obj_name] = f"{obj.score * 100:.1f}%"
-        
-        # 3. Landmark Detection
+        # 2. Landmark Detection (helpful for Scotland-specific tags)
         logger.debug("Detecting landmarks...")
         landmark_response = vision_client.landmark_detection(image=vision_image)
         for landmark in landmark_response.landmark_annotations:
@@ -77,124 +68,19 @@ def get_vision_tags(vision_client, image_url, threshold=30):
                             all_tags.add('scotland')
                             if lat > 58:  # Northern Scotland
                                 all_tags.add('northern scotland')
-                                if lng < -4:  # Northwest
-                                    all_tags.add('northwest highlands')
-                                    all_tags.add('west coast')
-                                elif lng > -3:  # Northeast
-                                    all_tags.add('northeast scotland')
-                                    all_tags.add('east coast')
                             elif 57 < lat < 58:  # Central Scotland
                                 all_tags.add('central scotland')
-                            if lng < -5:  # Western Scotland
-                                all_tags.add('western scotland')
-                            elif lng > -3:  # Eastern Scotland
-                                all_tags.add('eastern scotland')
         
-        # 4. Text Detection (OCR)
-        logger.debug("Reading text and signs...")
-        text_response = vision_client.text_detection(image=vision_image)
-        if text_response.text_annotations:
-            full_text = text_response.text_annotations[0].description.lower()
-            words = set(full_text.split())
-            for word in words:
-                if len(word) > 2:  # Skip very short words
-                    if hasattr(text_response.text_annotations[0], 'confidence'):
-                        confidence = text_response.text_annotations[0].confidence * 100
-                        if confidence >= 45:  # 45% threshold for text
-                            all_tags.add(word)
-                            confidence_scores[f"text_{word}"] = f"{confidence:.1f}%"
-            if words:
-                all_tags.add('text_present')
-
-        # 5. Web Detection
-        logger.debug("Analyzing web context...")
-        web_response = vision_client.web_detection(image=vision_image)
-        if web_response.web_detection:
-            # Best guess labels
-            for label in web_response.web_detection.best_guess_labels:
-                label_lower = label.label.lower()
-                all_tags.add(label_lower)
-                confidence_scores[f"web_{label_lower}"] = "web match"
-            
-            # Web entities
-            for entity in web_response.web_detection.web_entities:
-                if entity.score >= 0.3:  # 30% threshold
-                    entity_lower = entity.description.lower()
-                    all_tags.add(entity_lower)
-                    confidence_scores[f"web_{entity_lower}"] = f"{entity.score * 100:.1f}%"
-
-        # 6. Image Properties
-        logger.debug("Analyzing image properties...")
-        property_response = vision_client.image_properties(image=vision_image)
-        if property_response.image_properties_annotation:
-            colors = property_response.image_properties_annotation.dominant_colors.colors
-            
-            # Analyze colors if they make up at least 60% of the image
-            bright_colors = 0
-            dark_colors = 0
-            nature_colors = 0
-            
-            for color in colors[:3]:  # Look at top 3 dominant colors
-                if color.score >= 0.6:  # 60% threshold
-                    rgb_sum = color.color.red + color.color.green + color.color.blue
-                    
-                    # Brightness analysis
-                    if rgb_sum > 600:
-                        bright_colors += 1
-                    elif rgb_sum < 300:
-                        dark_colors += 1
-                    
-                    # Color-based environment detection
-                    if (color.color.blue > 200 and 
-                        color.color.blue > color.color.red and 
-                        color.color.blue > color.color.green):
-                        all_tags.add('blue sky')
-                        confidence_scores['blue sky'] = f"{color.score * 100:.1f}%"
-                    
-                    elif (color.color.green > 150 and 
-                          color.color.green > color.color.red and 
-                          color.color.green > color.color.blue):
-                        nature_colors += 1
-            
-            # Add summary color tags
-            if bright_colors >= 2:
-                all_tags.add('bright')
-                all_tags.add('well lit')
-            elif dark_colors >= 2:
-                all_tags.add('dark')
-                all_tags.add('low light')
-            
-            if nature_colors >= 2:
-                all_tags.add('verdant')
-                all_tags.add('greenery')
-
-        # 7. Face Detection
-        logger.debug("Analyzing people and expressions...")
+        # 3. Face Detection (just for people detection - minimal memory)
+        logger.debug("Detecting people...")
         face_response = vision_client.face_detection(image=vision_image)
         if face_response.face_annotations:
-            faces = face_response.face_annotations
-            if len(faces) > 0:  # If any faces detected with 30% confidence
-                face_confidence = min(face.detection_confidence for face in faces)
-                if face_confidence >= 0.3:
-                    all_tags.add('people')
-                    confidence_scores['people'] = f"{face_confidence * 100:.1f}%"
-                    
-                    if len(faces) > 1:
-                        all_tags.add('group photo')
-                        if len(faces) > 4:
-                            all_tags.add('group activity')
-                    
-                    # Expression detection
-                    joy_detected = any(face.joy_likelihood >= vision.Likelihood.LIKELY for face in faces)
-                    if joy_detected:
-                        all_tags.add('smiling')
-                        all_tags.add('happy')
-                    
-                    # Check for outdoor/activity context
-                    if 'outdoor' in all_tags or 'nature' in all_tags:
-                        all_tags.add('people outdoors')
-                        if len(faces) > 1:
-                            all_tags.add('group outdoors')
+            all_tags.add('people')
+            if len(face_response.face_annotations) > 1:
+                all_tags.add('group photo')
+        
+        # Add AutoTagged marker
+        all_tags.add('AutoTagged')
         
         logger.debug(f"Vision analysis complete. Found {len(all_tags)} tags.")
         return list(all_tags), confidence_scores
@@ -261,7 +147,7 @@ def process():
             )
             debug_info.append("SmugMug client initialized successfully")
             
-            # Setup Google Cloud Vision client - IMPORTANT CHANGES HERE
+            # Setup Google Cloud Vision client
             debug_info.append("Setting up Google Cloud Vision client...")
             temp_file = None
             
@@ -281,11 +167,11 @@ def process():
                 creds_file = Path.home() / "Desktop" / "SmugMugTagger" / "credentials" / "google_credentials.json"
                 os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = str(creds_file)
             
-            # Now create the Vision client
+            # Create Vision client
             vision_client = vision.ImageAnnotatorClient()
             debug_info.append("Vision client initialized successfully")
             
-            # Step 3: Get user info
+            # Get user info
             debug_info.append("Getting user info...")
             response = smugmug.get(
                 'https://api.smugmug.com/api/v2!authuser',
@@ -301,11 +187,11 @@ def process():
             nickname = user_data['NickName']
             debug_info.append(f"Authenticated as: {nickname}")
             
-            # Step 4: Extract album path
+            # Extract album path
             album_path = get_path_from_url(url)
             debug_info.append(f"Extracted album path: {album_path}")
             
-            # Step 5: Get album info
+            # Get album info
             debug_info.append(f"Looking up album...")
             response = smugmug.get(
                 f'https://api.smugmug.com/api/v2/user/{nickname}!urlpathlookup',
@@ -331,13 +217,11 @@ def process():
             album_name = album_data['Name']
             debug_info.append(f"Found album: '{album_name}' with key: {album_key}")
             
-            # Step 6: Get images
+            # Get images
             debug_info.append("Getting images from album...")
             response = smugmug.get(
                 f'https://api.smugmug.com/api/v2/album/{album_key}!images',
                 params={
-                    '_expand': 'ImageSizes',
-                    '_shorturis': 1,
                     '_filter': 'ImageKey,FileName,ThumbnailUrl,ArchivedUri,WebUri,KeywordArray'
                 },
                 headers={'Accept': 'application/json'}
@@ -353,6 +237,13 @@ def process():
             debug_info.append(f"Found {len(images)} images in the album")
             
             if not images:
+                if temp_file_path and os.path.exists(temp_file_path):
+                    try:
+                        os.unlink(temp_file_path)
+                        debug_info.append("Cleaned up temporary credentials file")
+                    except Exception as e:
+                        debug_info.append(f"Error removing temp file: {str(e)}")
+                        
                 return jsonify({
                     "success": True,
                     "message": "No images found in the album",
@@ -361,109 +252,101 @@ def process():
                     "debug": debug_info
                 })
             
-            # Step 7: Process each image
+            # Process images - limit to 3 at a time to avoid memory issues
+            batch_size = 3
             processed_images = []
             failed_images = []
             
-            debug_info.append("Starting to process images...")
+            debug_info.append(f"Processing images in batches of {batch_size}...")
             
-            for idx, image in enumerate(images):
-                try:
-                    debug_info.append(f"Processing image {idx+1}/{len(images)}: {image.get('FileName', 'Unknown')}")
-                    
-                    # Check if already tagged
-                    current_keywords = image.get('KeywordArray', [])
-                    if 'AutoTagged' in current_keywords:
-                        debug_info.append(f"Image already tagged, skipping")
-                        continue
-                    
-                    # Get image URLs
-                    image_key = f"{image['ImageKey']}-0"
-                    image_url = image.get('ArchivedUri') or image.get('WebUri')
-                    thumbnail_url = image.get('ThumbnailUrl')
-                    
-                    if not image_url:
-                        debug_info.append(f"No image URL found, skipping")
+            for i in range(0, len(images), batch_size):
+                batch = images[i:i+batch_size]
+                debug_info.append(f"Processing batch {i//batch_size + 1}/{(len(images)-1)//batch_size + 1} ({len(batch)} images)")
+                
+                for image in batch:
+                    try:
+                        # Check if already tagged
+                        current_keywords = image.get('KeywordArray', [])
+                        if current_keywords and 'AutoTagged' in current_keywords:
+                            debug_info.append(f"Image {image.get('FileName', 'Unknown')} already tagged, skipping")
+                            continue
+                        
+                        # Get image URLs
+                        image_key = f"{image['ImageKey']}-0"
+                        image_url = image.get('ArchivedUri') or image.get('WebUri')
+                        thumbnail_url = image.get('ThumbnailUrl')
+                        
+                        if not image_url:
+                            debug_info.append(f"No image URL found for {image.get('FileName', 'Unknown')}, skipping")
+                            failed_images.append(image.get('FileName', 'Unknown'))
+                            continue
+                        
+                        # Get Vision AI tags
+                        debug_info.append(f"Getting Vision AI tags for {image.get('FileName', 'Unknown')}")
+                        vision_tags, confidence_scores = get_vision_tags(vision_client, image_url, threshold)
+                        
+                        if not vision_tags:
+                            debug_info.append(f"No tags returned from Vision API for {image.get('FileName', 'Unknown')}, skipping")
+                            failed_images.append(image.get('FileName', 'Unknown'))
+                            continue
+                        
+                        # Ensure current_keywords is a list
+                        if current_keywords is None:
+                            current_keywords = []
+                        elif isinstance(current_keywords, str):
+                            current_keywords = [current_keywords]
+                        
+                        # Filter out empty tags
+                        vision_tags = [tag for tag in vision_tags if tag.strip()]
+                        
+                        # Combine with existing tags
+                        all_tags = list(dict.fromkeys(current_keywords + vision_tags))
+                        debug_info.append(f"Combined {len(all_tags)} tags for {image.get('FileName', 'Unknown')}")
+                        
+                        # Update the image
+                        debug_info.append(f"Updating image {image_key}")
+                        update_data = {
+                            'KeywordArray': all_tags,
+                            'ShowKeywords': True
+                        }
+                        
+                        # Update base image
+                        base_response = smugmug.patch(
+                            f'https://api.smugmug.com/api/v2/image/{image_key}',
+                            headers={
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/json'
+                            },
+                            json=update_data
+                        )
+                        
+                        if base_response.status_code != 200:
+                            debug_info.append(f"Error updating base image: {base_response.status_code}")
+                            error_text = base_response.text
+                            if len(error_text) > 500:
+                                error_text = error_text[:500] + "..."
+                            debug_info.append(f"Response: {error_text}")
+                            failed_images.append(image.get('FileName', 'Unknown'))
+                            continue
+                        
+                        # Success
+                        debug_info.append(f"Successfully tagged image {image.get('FileName', 'Unknown')}")
+                        processed_images.append({
+                            'filename': image.get('FileName', 'Unknown'),
+                            'keywords': all_tags,
+                            'thumbnailUrl': thumbnail_url
+                        })
+                        
+                    except Exception as e:
+                        error_trace = traceback.format_exc()
+                        debug_info.append(f"Error processing image: {str(e)}")
+                        debug_info.append(f"Error trace: {error_trace}")
                         failed_images.append(image.get('FileName', 'Unknown'))
-                        continue
-                    
-                    debug_info.append(f"Image URL for Vision API: {image_url}")
-                    
-                    # Get Vision AI tags
-                    debug_info.append(f"Getting Vision AI tags for image")
-                    vision_tags, confidence_scores = get_vision_tags(vision_client, image_url, threshold)
-                    debug_info.append(f"Found {len(vision_tags)} tags")
-                    
-                    if not vision_tags:
-                        debug_info.append(f"No tags returned from Vision API, skipping")
-                        failed_images.append(image.get('FileName', 'Unknown'))
-                        continue
-                    
-                    # Add AutoTagged marker
-                    vision_tags.append('AutoTagged')
-                    
-                    # Combine with existing tags
-                    all_tags = list(dict.fromkeys(current_keywords + vision_tags))
-                    debug_info.append(f"Combined tags: {all_tags}")
-                    
-                    # Update the image
-                    debug_info.append(f"Updating base image...")
-                    update_data = {
-                        'KeywordArray': all_tags,
-                        'ShowKeywords': True
-                    }
-                    
-                    # Update base image
-                    base_response = smugmug.patch(
-                        f'https://api.smugmug.com/api/v2/image/{image_key}',
-                        headers={
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        json=update_data
-                    )
-                    
-                    if base_response.status_code != 200:
-                        debug_info.append(f"Error updating base image: {base_response.status_code}")
-                        debug_info.append(f"Response: {base_response.text}")
-                        failed_images.append(image.get('FileName', 'Unknown'))
-                        continue
-                    
-                    # Update album image
-                    debug_info.append(f"Updating album image...")
-                    album_response = smugmug.patch(
-                        f'https://api.smugmug.com/api/v2/album/{album_key}/image/{image_key}',
-                        headers={
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        },
-                        json=update_data
-                    )
-                    
-                    if album_response.status_code != 200:
-                        debug_info.append(f"Error updating album image: {album_response.status_code}")
-                        debug_info.append(f"Response: {album_response.text}")
-                        failed_images.append(image.get('FileName', 'Unknown'))
-                        continue
-                    
-                    # Success
-                    debug_info.append(f"Successfully tagged image")
-                    processed_images.append({
-                        'filename': image.get('FileName', 'Unknown'),
-                        'keywords': all_tags,
-                        'thumbnailUrl': thumbnail_url
-                    })
-                    
-                    # Brief pause between images to prevent rate limiting
-                    time.sleep(1)
-                    
-                except Exception as e:
-                    error_trace = traceback.format_exc()
-                    debug_info.append(f"Error processing image: {str(e)}")
-                    debug_info.append(f"Error trace: {error_trace}")
-                    failed_images.append(image.get('FileName', 'Unknown'))
+                
+                # Brief pause between batches to allow memory cleanup
+                time.sleep(2)
             
-            # Clean up temp file if it exists
+            # Clean up temp file
             if temp_file_path and os.path.exists(temp_file_path):
                 try:
                     os.unlink(temp_file_path)
@@ -591,26 +474,26 @@ def test_credentials():
                 try:
                     vision_client = vision.ImageAnnotatorClient()
                     
-                    # Try a simple operation to verify the client works
+                    # Test with a simple operation
                     test_image = vision.Image()
                     test_image.source.image_uri = "https://storage.googleapis.com/cloud-samples-data/vision/face/faces.jpeg"
-                    test_response = vision_client.face_detection(image=test_image)
+                    test_response = vision_client.label_detection(image=test_image)
                     
-                    if len(test_response.face_annotations) > 0:
+                    if len(test_response.label_annotations) > 0:
                         results["vision"] = {
                             "status": "working",
-                            "details": f"Successfully detected {len(test_response.face_annotations)} faces in test image"
+                            "details": f"Successfully detected {len(test_response.label_annotations)} labels in test image"
                         }
                     else:
                         results["vision"] = {
                             "status": "working",
-                            "details": "Successfully initialized Vision client but no faces detected in test image"
+                            "details": "Vision client initialized but no labels detected"
                         }
                     
                 except Exception as e:
                     results["vision"] = {
                         "status": "error",
-                        "details": f"Error initializing or using Vision client: {str(e)}"
+                        "details": f"Error using Vision client: {str(e)}"
                     }
                 
                 # Clean up
