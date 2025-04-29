@@ -9,7 +9,6 @@ from requests_oauthlib import OAuth1Session
 from google.cloud import vision
 from urllib.parse import urlparse
 import time
-import concurrent.futures
 
 # Configure logging
 logging.basicConfig(
@@ -86,42 +85,6 @@ def get_vision_tags(vision_client, image_url, threshold=20):
                         entity_lower = entity.description.lower()
                         all_tags.add(entity_lower)
                         confidence_scores[f"web_{entity_lower}"] = f"{entity.score * 100:.1f}%"
-                
-                # Process web page titles
-                for page in web_response.web_detection.pages_with_matching_images:
-                    if page.page_title:
-                        # Potential landmark indicators in Scottish context
-                        landmark_indicators = ['castle', 'lighthouse', 'point', 'isle', 'loch', 'ben', 'hill', 
-                                              'mountain', 'stacks', 'bridge', 'glen', 'cairn', 'conic', 'duncansby',
-                                              'eilean', 'donan', 'skye', 'highland', 'scotland']
-                        
-                        title_lower = page.page_title.lower()
-                        for indicator in landmark_indicators:
-                            if indicator in title_lower:
-                                # Extract a reasonable chunk around the indicator
-                                start = max(0, title_lower.find(indicator) - 15)
-                                end = min(len(title_lower), title_lower.find(indicator) + len(indicator) + 15)
-                                phrase = title_lower[start:end].strip()
-                                
-                                # Clean up the phrase
-                                for char in [',', '|', '-', ':', '(', ')', '.', '"', "'"]:
-                                    phrase = phrase.replace(char, ' ')
-                                
-                                # Split into words and reconstruct a cleaner phrase
-                                words = [w for w in phrase.split() if len(w) > 2]
-                                if len(words) >= 2 and len(words) <= 5:
-                                    potential_landmark = ' '.join(words)
-                                    all_tags.add(potential_landmark)
-                                    
-                                    # Look for specific Scottish landmarks
-                                    if "eilean" in potential_landmark and "donan" in potential_landmark:
-                                        all_tags.add("eilean donan castle")
-                                    if "conic" in potential_landmark and "hill" in potential_landmark:
-                                        all_tags.add("conic hill")
-                                    if "duncansby" in potential_landmark:
-                                        all_tags.add("duncansby stacks")
-                                    if "eilean" in potential_landmark and "glas" in potential_landmark:
-                                        all_tags.add("eilean glas lighthouse")
         except Exception as e:
             logger.error(f"Error in web detection: {str(e)}")
         
@@ -330,7 +293,7 @@ def process():
                 })
             
             # Process images in smaller batches with more time between batches
-            batch_size = 2  # Reduce batch size to 2 to avoid timeouts
+            batch_size = 2  # Fixed at 2 to avoid timeouts
             processed_images = []
             failed_images = []
             
