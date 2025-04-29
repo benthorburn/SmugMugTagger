@@ -99,6 +99,23 @@
             color: #777;
             font-size: 14px;
         }
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 12px;
+        }
+        .debug-toggle {
+            color: #999;
+            cursor: pointer;
+            margin-top: 20px;
+            text-align: center;
+        }
+        .debug-info {
+            display: none;
+            margin-top: 20px;
+        }
     </style>
 </head>
 <body>
@@ -128,6 +145,7 @@
     
     <div class="footer">
         <p>Powered by Google Cloud Vision AI and SmugMug API</p>
+        <p><a href="/diagnostic">Go to Diagnostic Page</a></p>
     </div>
     
     <script>
@@ -152,21 +170,31 @@
                 document.getElementById('loader').style.display = 'none';
                 document.getElementById('result').style.display = 'block';
                 
+                let resultHtml = '';
+                
                 if (data.error) {
-                    document.getElementById('result').innerHTML = `
+                    resultHtml += `
                         <div class="alert alert-danger">
                             <strong>Error:</strong> ${data.error}
                         </div>`;
                 } else {
-                    let resultHtml = `
+                    resultHtml += `
                         <h2>Processing Results</h2>
-                        <div class="alert alert-success">
-                            <p><strong>Total Images:</strong> ${data.totalImages}</p>
-                            <p><strong>Successfully Processed:</strong> ${data.successfullyProcessed}</p>
-                            <p><strong>Failed:</strong> ${data.failed}</p>
-                        </div>
-                        <p><a href="${data.albumUrl}" target="_blank">View Album on SmugMug</a></p>
-                    `;
+                        <div class="alert alert-success">`;
+                        
+                    if (data.message) {
+                        resultHtml += `<p>${data.message}</p>`;
+                    }
+                    
+                    resultHtml += `
+                            <p><strong>Total Images:</strong> ${data.totalImages || 0}</p>
+                            <p><strong>Successfully Processed:</strong> ${data.successfullyProcessed || 0}</p>
+                            <p><strong>Failed:</strong> ${data.failed || 0}</p>
+                        </div>`;
+                        
+                    if (data.albumUrl) {
+                        resultHtml += `<p><a href="${data.albumUrl}" target="_blank">View Album on SmugMug</a></p>`;
+                    }
                     
                     if (data.processedImages && data.processedImages.length > 0) {
                         resultHtml += '<h3>Processed Images:</h3>';
@@ -192,9 +220,19 @@
                                 </ul>
                             </div>`;
                     }
-                    
-                    document.getElementById('result').innerHTML = resultHtml;
                 }
+                
+                // Add debug information
+                if (data.debug && data.debug.length > 0) {
+                    resultHtml += `<div class="debug-toggle" onclick="toggleDebug()">Show Debug Information</div>`;
+                    resultHtml += `<div class="debug-info" id="debugInfo"><h3>Debug Information:</h3><pre>`;
+                    data.debug.forEach(line => {
+                        resultHtml += line + '\n';
+                    });
+                    resultHtml += `</pre></div>`;
+                }
+                
+                document.getElementById('result').innerHTML = resultHtml;
             })
             .catch(error => {
                 document.getElementById('loader').style.display = 'none';
@@ -205,6 +243,19 @@
                     </div>`;
             });
         });
+        
+        function toggleDebug() {
+            const debugInfo = document.getElementById('debugInfo');
+            const toggle = document.querySelector('.debug-toggle');
+            
+            if (debugInfo.style.display === 'block') {
+                debugInfo.style.display = 'none';
+                toggle.textContent = 'Show Debug Information';
+            } else {
+                debugInfo.style.display = 'block';
+                toggle.textContent = 'Hide Debug Information';
+            }
+        }
     </script>
 </body>
 </html>
