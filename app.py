@@ -86,7 +86,7 @@ def save_progress(session_id, album_key, album_name, album_url, total_images,
         'album_name': album_name,
         'album_url': album_url,
         'total_images': total_images,
-        'processed_indices': processed_indices,
+        'processed_indices': list(processed_indices),
         'processed_images': processed_images,
         'failed_images': failed_images,
         'next_index': next_index,
@@ -328,7 +328,7 @@ def process_images_batch(smugmug, vision_client, album_key, images,
     """
     processed_images = []
     failed_images = []
-    processed_indices = []
+    processed_indices = set()
     
     # Use existing state if provided
     if process_state:
@@ -355,7 +355,7 @@ def process_images_batch(smugmug, vision_client, album_key, images,
             current_keywords = image.get('KeywordArray', [])
             if current_keywords and 'AutoTagged' in current_keywords:
                 logger.debug(f"Image {image.get('FileName', 'Unknown')} already tagged, skipping")
-                processed_indices.append(i)
+                processed_indices.add(i)
                 continue
             
             # Get image URLs
@@ -422,7 +422,7 @@ def process_images_batch(smugmug, vision_client, album_key, images,
                 'keywords': all_tags,
                 'thumbnailUrl': thumbnail_url
             })
-            processed_indices.append(i)
+            processed_indices.add(i)
             
         except Exception as e:
             error_trace = traceback.format_exc()
@@ -526,7 +526,7 @@ def process_album_background(session_id, start_index, batch_size=2):
             failed_images.extend(new_failed)
             
             processed_indices = current_state['processed_indices']
-            processed_indices.extend(updated_indices)
+            processed_indices.update(updated_indices)
             
             # Save updated progress
             save_progress(
@@ -802,7 +802,7 @@ def process():
             # Initialize from existing state if available
             processed_images = []
             failed_images = []
-            processed_indices = []
+            processed_indices = set()
             
             if existing_state:
                 processed_images = existing_state.get('processed_images', [])
@@ -820,7 +820,7 @@ def process():
             # Combine results
             processed_images.extend(new_processed)
             failed_images.extend(new_failed)
-            processed_indices.extend(updated_indices)
+            processed_indices.update(updated_indices)
             
             # Save progress
             state = save_progress(
