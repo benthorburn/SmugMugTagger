@@ -344,6 +344,22 @@ def process_images_batch(smugmug, vision_client, album_key, images,
     
     # Process one image at a time for stability
     for i in range(start_index, end_index):
+        # Skip large images that might cause timeouts
+            try:
+                image_size = 0
+                if 'ArchivedSize' in image:
+                    image_size = int(image['ArchivedSize'])
+                elif 'OriginalSize' in image:
+                    image_size = int(image['OriginalSize'])
+                
+                # Skip images larger than 10MB
+                if image_size > 10 * 1024 * 1024:
+                    logger.warning(f"Skipping large image {image.get('FileName', 'Unknown')} ({image_size/1024/1024:.1f}MB)")
+                    failed_images.append(f"{image.get('FileName', 'Unknown')} (too large)")
+                    continue
+            except Exception as size_error:
+                # Continue even if we can't determine size
+                logger.debug(f"Could not determine image size: {str(size_error)}")
         # Skip already processed
         if i in processed_indices:
             logger.debug(f"Skipping already processed image at index {i}")
@@ -356,6 +372,10 @@ def process_images_batch(smugmug, vision_client, album_key, images,
             if current_keywords and 'AutoTagged' in current_keywords:
                 logger.debug(f"Image {image.get('FileName', 'Unknown')} already tagged, skipping")
                 processed_indices.add(i)
+                # Force garbage collection after each image to manage memory
+            if i % 2 == 0:  # Run GC every 2 images
+                import gc
+                gc.collect()
                 continue
             
             # Get image URLs
