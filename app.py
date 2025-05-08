@@ -12,6 +12,7 @@ import time
 import re
 import hashlib
 import datetime
+import threading
 
 # Configure logging
 logging.basicConfig(
@@ -28,6 +29,8 @@ app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'dev_secret_key')
 # In-memory state cache - will be lost on app restart
 # For demonstration purposes - in production, use Redis or database
 PROCESS_STATE = {}
+# Background processing tasks
+BACKGROUND_TASKS = {}
 
 def get_path_from_url(url):
     """Extract path from SmugMug URL"""
@@ -76,7 +79,7 @@ def generate_session_id(album_url, threshold):
     return hashlib.md5(source.encode()).hexdigest()
 
 def save_progress(session_id, album_key, album_name, album_url, total_images, 
-                 processed_indices, processed_images, failed_images, next_index):
+                 processed_indices, processed_images, failed_images, next_index, is_processing=False):
     """Save processing progress to state cache"""
     PROCESS_STATE[session_id] = {
         'album_key': album_key,
@@ -87,7 +90,8 @@ def save_progress(session_id, album_key, album_name, album_url, total_images,
         'processed_images': processed_images,
         'failed_images': failed_images,
         'next_index': next_index,
-        'last_updated': datetime.datetime.now().isoformat()
+        'last_updated': datetime.datetime.now().isoformat(),
+        'is_processing': is_processing  # Flag to indicate if background processing is active
     }
     return PROCESS_STATE[session_id]
 
@@ -434,6 +438,150 @@ def process_images_batch(smugmug, vision_client, album_key, images,
     
     return processed_images, failed_images, processed_indices, next_index
 
+def process_album_background(session_id, start_index, batch_size=2):
+    """Background thread function to process an entire album automatically"""
+    try:
+        # Load session state
+        state = load_progress(session_id)
+        if not state:
+            logger.error(f"No session state found for {session_id}")
+            return
+        
+        # Mark session as processing
+        save_progress(
+            session_id, 
+            state['album_key'], 
+            state['album_name'], 
+            state['album_url'], 
+            state['total_images'], 
+            state['processed_indices'], 
+            state['processed_images'], 
+            state['failed_images'], 
+            state['next_index'],
+            is_processing=True
+        )
+        
+        logger.debug(f"Starting background processing for session {session_id} from index {start_index}")
+        
+        # Setup SmugMug client
+        tokens = json.loads(os.environ.get('SMUGMUG_TOKENS'))
+        api_key = os.environ.get('SMUGMUG_API_KEY', 'jFhhPG4GQcm7VRRqs7m3ndXjHMxgp9Dq')
+        api_secret = os.environ.get('SMUGMUG_API_SECRET', 'C2Z7nFsXBMvMpvzq5NhRp9DqsJN7kDThP744WCr34cmPk4b24NdPB3sz6gNBPzjR')
+        
+        smugmug = OAuth1Session(
+            api_key,
+            client_secret=api_secret,
+            resource_owner_key=tokens['access_token'],
+            resource_owner_secret=tokens['access_token_secret']
+        )
+        
+        # Setup Google Cloud Vision client
+        credentials_json = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS_JSON')
+        
+        # Create a persistent file for the entire process
+        temp_file = tempfile.NamedTemporaryFile(delete=False, mode='w')
+        temp_file.write(credentials_json)
+        temp_file.close()
+        temp_file_path = temp_file.name
+        
+        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_file_path
+        vision_client = vision.ImageAnnotatorClient()
+        
+        # Get album images
+        response = smugmug.get(
+            f'https://api.smugmug.com/api/v2/album/{state["album_key"]}!images',
+            params={
+                '_filter': 'ImageKey,FileName,ThumbnailUrl,ArchivedUri,WebUri,KeywordArray'
+            },
+            headers={'Accept': 'application/json'}
+        )
+        
+        if response.status_code != 200:
+            logger.error(f"Failed to get images: {response.status_code}")
+            logger.error(response.text)
+            return
+        
+        images = response.json()['Response'].get('AlbumImage', [])
+        total_images = len(images)
+        
+        current_index = start_index
+        threshold = 30  # Default threshold
+        
+        # Process all remaining batches
+        while current_index < total_images:
+            # Reload state to get any updates
+            current_state = load_progress(session_id)
+            
+            # Process next batch
+            new_processed, new_failed, updated_indices, next_index = process_images_batch(
+                smugmug, vision_client, state['album_key'], images, 
+                current_index, batch_size, threshold, current_state
+            )
+            
+            # Update processed images and indices
+            processed_images = current_state['processed_images']
+            processed_images.extend(new_processed)
+            
+            failed_images = current_state['failed_images']
+            failed_images.extend(new_failed)
+            
+            processed_indices = current_state['processed_indices']
+            processed_indices.extend(updated_indices)
+            
+            # Save updated progress
+            save_progress(
+                session_id, 
+                state['album_key'], 
+                state['album_name'], 
+                state['album_url'], 
+                total_images, 
+                processed_indices, 
+                processed_images, 
+                failed_images, 
+                next_index,
+                is_processing=(next_index != -1)
+            )
+            
+            # Update current index for next batch
+            if next_index == -1:
+                # All done
+                logger.debug(f"Completed processing all images for session {session_id}")
+                break
+                
+            current_index = next_index
+            
+        # Clean up temp file
+        if os.path.exists(temp_file_path):
+            os.unlink(temp_file_path)
+            
+        # Remove from background tasks
+        if session_id in BACKGROUND_TASKS:
+            del BACKGROUND_TASKS[session_id]
+            
+    except Exception as e:
+        logger.error(f"Error in background processing: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        # Mark session as not processing
+        state = load_progress(session_id)
+        if state:
+            save_progress(
+                session_id, 
+                state['album_key'], 
+                state['album_name'], 
+                state['album_url'], 
+                state['total_images'], 
+                state['processed_indices'], 
+                state['processed_images'], 
+                state['failed_images'], 
+                state['next_index'],
+                is_processing=False
+            )
+        
+        # Remove from background tasks
+        if session_id in BACKGROUND_TASKS:
+            del BACKGROUND_TASKS[session_id]
+
 @app.route('/')
 def index():
     """Render the main page with improved UI"""
@@ -551,6 +699,10 @@ def process():
             auth_nickname = user_data['NickName']
             debug_info.append(f"Authenticated as: {auth_nickname}")
             
+            # If we have existing state, we can skip the album lookup
+            album_key = None
+            album_url = None
+            album_name
             # If we have existing state, we can skip the album lookup
             album_key = None
             album_url = None
@@ -677,6 +829,21 @@ def process():
                 failed_images, next_index
             )
             
+            # Start background processing for remaining images
+            if next_index != -1 and session_id not in BACKGROUND_TASKS:
+                debug_info.append("Starting background processing for remaining images")
+                
+                # Launch background thread
+                background_thread = threading.Thread(
+                    target=process_album_background,
+                    args=(session_id, next_index, 2)  # Process 2 images per batch
+                )
+                background_thread.daemon = True  # Allow thread to exit when main thread exits
+                background_thread.start()
+                
+                # Store thread reference
+                BACKGROUND_TASKS[session_id] = background_thread
+            
             # Clean up temp file
             if temp_file_path and os.path.exists(temp_file_path):
                 try:
@@ -695,13 +862,13 @@ def process():
             else:
                 # More images to process
                 message = f"Processed {len(processed_indices)} of {total_images} images so far ({len(processed_indices) / total_images * 100:.1f}%). "
-                message += f"Click 'Continue Processing' to tag more images."
+                message += f"The remaining images are being processed automatically in the background."
             
             return jsonify({
                 "success": True,
                 "message": message,
-                "processedImages": processed_images,
-                "failedImages": failed_images,
+                "processedImages": new_processed,  # Only return newly processed images
+                "failedImages": new_failed,  # Only return newly failed images
                 "totalImages": total_images,
                 "processedCount": len(processed_indices),
                 "failedCount": len(failed_images),
@@ -711,6 +878,7 @@ def process():
                 "albumUrl": album_url,
                 "albumName": album_name,
                 "isComplete": next_index == -1,
+                "isProcessing": session_id in BACKGROUND_TASKS,
                 "debug": debug_info
             })
             
@@ -757,7 +925,8 @@ def list_sessions():
             'processed': len(data.get('processed_indices', [])),
             'lastUpdated': data.get('last_updated', ''),
             'nextIndex': data.get('next_index', -1),
-            'isComplete': data.get('next_index', -1) == -1
+            'isComplete': data.get('next_index', -1) == -1,
+            'isProcessing': session_id in BACKGROUND_TASKS  # Check if a thread is processing this session
         })
     
     # Sort by last updated, newest first
@@ -783,13 +952,20 @@ def get_session(session_id):
         'failedImages': session_data.get('failed_images', []),
         'lastUpdated': session_data.get('last_updated', ''),
         'nextIndex': session_data.get('next_index', -1),
-        'isComplete': session_data.get('next_index', -1) == -1
+        'isComplete': session_data.get('next_index', -1) == -1,
+        'isProcessing': session_id in BACKGROUND_TASKS  # Check if a thread is processing this session
     })
 
 @app.route('/clear-session/<session_id>', methods=['POST'])
 def clear_session(session_id):
     """Clear a specific session"""
     if session_id in PROCESS_STATE:
+        # Stop background processing if active
+        if session_id in BACKGROUND_TASKS:
+            # Note: We can't really "stop" a thread, but we'll remove the reference
+            # The thread will continue running but will eventually exit naturally
+            del BACKGROUND_TASKS[session_id]
+            
         del PROCESS_STATE[session_id]
         return jsonify({"success": True, "message": "Session cleared"})
     
@@ -920,6 +1096,25 @@ def test_credentials():
 def diagnostic():
     """Render diagnostic page"""
     return render_template('diagnostic.html')
+
+@app.route('/status')
+def status():
+    """Show processing status for all sessions"""
+    return jsonify({
+        "active_sessions": len(PROCESS_STATE),
+        "background_tasks": len(BACKGROUND_TASKS),
+        "sessions": [
+            {
+                "id": session_id,
+                "album": data.get("album_name", "Unknown"),
+                "total": data.get("total_images", 0),
+                "processed": len(data.get("processed_indices", [])),
+                "status": "processing" if session_id in BACKGROUND_TASKS else 
+                         "complete" if data.get("next_index", -1) == -1 else "paused"
+            }
+            for session_id, data in PROCESS_STATE.items()
+        ]
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
