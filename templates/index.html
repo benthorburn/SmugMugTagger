@@ -473,7 +473,7 @@
                     
                     let html = '';
                     sessions.forEach(session => {
-                        const progressPercent = (session.processed / session.totalImages) * 100;
+                        const progressPercent = Math.min(Math.round((session.processed / session.totalImages) * 100), 100);
                         
                         // Determine status display
                         let statusClass = '';
@@ -737,14 +737,14 @@
                     const totalImages = data.totalImages || 0;
                     const processedCount = data.processedCount || 0;
                     const failedCount = data.failedCount || 0;
-                    const progressPercent = totalImages > 0 ? Math.round((processedCount / totalImages) * 100) : 0;
+                    const progressPercent = totalImages > 0 ? Math.min(Math.round((processedCount / totalImages) * 100), 100) : 0;
                     
                     resultHtml += `
                         </div>
                         <div class="progress-container">
                             <div class="progress-text">
                                 <span>Processing Progress:</span>
-                                <span>${processedCount} of ${totalImages} images (${progressPercent}%)</span>
+                                <span>${Math.min(processedCount, totalImages)} of ${totalImages} images (${progressPercent}%)</span>
                             </div>
                             <div class="progress-bar">
                                 <div class="progress-fill" style="width: ${progressPercent}%"></div>
