@@ -699,14 +699,10 @@ def process():
             auth_nickname = user_data['NickName']
             debug_info.append(f"Authenticated as: {auth_nickname}")
             
-            # If we have existing state, we can skip the album lookup
+# If we have existing state, we can skip the album lookup
             album_key = None
             album_url = None
-            album_name
-            # If we have existing state, we can skip the album lookup
-            album_key = None
-            album_url = None
-            album_name = None
+            album_name = None  # Initialize to None at this point
             images = None
             
             if existing_state:
@@ -758,6 +754,10 @@ def process():
                 album_url = album_data['WebUri']
                 debug_info.append(f"Found album: '{album_name}' with key: {album_key}")
             
+            # If we get here, ensure album_name is set to something in case of an error
+            if album_name is None:
+                album_name = "Unknown Album"
+                
             # Get images
             debug_info.append("Getting images from album...")
             response = smugmug.get(
