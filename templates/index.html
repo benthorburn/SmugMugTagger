@@ -101,6 +101,10 @@
             background-color: #2a4a2d;
             color: #9fd9a0;
         }
+        .alert-info {
+            background-color: #2a3a4a;
+            color: #9fc5d9;
+        }
         .alert-danger {
             background-color: #4a2a2a;
             color: #d99f9f;
@@ -295,6 +299,35 @@
         .tab-content.active {
             display: block;
         }
+        
+        /* New styles for status indicator */
+        .status-indicator {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 10px;
+            font-size: 12px;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+        .status-processing {
+            background-color: #2196F3;
+            color: white;
+        }
+        .status-complete {
+            background-color: #4CAF50;
+            color: white;
+        }
+        .status-paused {
+            background-color: #FFC107;
+            color: black;
+        }
+        
+        /* Auto-refresh indicator */
+        #refreshIndicator {
+            margin-left: 10px;
+            font-size: 12px;
+            color: #aaa;
+        }
     </style>
 </head>
 <body>
@@ -305,7 +338,7 @@
     <div class="tab-container">
         <div class="tab-buttons">
             <button class="tab-button active" onclick="openTab(event, 'newProcessTab')">New Processing</button>
-            <button class="tab-button" onclick="openTab(event, 'activeSessionsTab')">Active Sessions</button>
+            <button class="tab-button" onclick="openTab(event, 'activeSessionsTab')">Active Sessions <span id="refreshIndicator"></span></button>
         </div>
         
         <div id="newProcessTab" class="tab-content active">
@@ -335,7 +368,7 @@
         <div id="activeSessionsTab" class="tab-content">
             <div class="form-container">
                 <h3>Active Processing Sessions</h3>
-                <p>Continue processing albums that were interrupted.</p>
+                <p>View status of active albums being processed.</p>
                 
                 <div id="sessionsList">
                     <p>Loading sessions...</p>
@@ -357,7 +390,12 @@
         <p><a href="/diagnostic">Go to Diagnostic Page</a></p>
     </div>
     
-    <script>
+<script>
+        // Auto-refresh variables 
+        let refreshInterval = null;
+        let refreshCounter = 0;
+        const REFRESH_INTERVAL_MS = 10000; // 10 seconds
+        
         document.addEventListener('DOMContentLoaded', function() {
             loadSessions();
         });
@@ -381,10 +419,45 @@
             // Add active class to the button that opened the tab
             evt.currentTarget.classList.add("active");
             
-            // If opening active sessions tab, refresh the data
+            // If opening active sessions tab, refresh the data and setup auto-refresh
             if (tabName === "activeSessionsTab") {
                 loadSessions();
+                startAutoRefresh();
+            } else {
+                stopAutoRefresh();
             }
+        }
+        
+        function startAutoRefresh() {
+            // Clear any existing interval
+            stopAutoRefresh();
+            
+            // Set new interval for auto-refresh
+            refreshCounter = 0;
+            updateRefreshIndicator();
+            
+            refreshInterval = setInterval(function() {
+                refreshCounter++;
+                if (refreshCounter >= 10) {
+                    loadSessions();
+                    refreshCounter = 0;
+                }
+                updateRefreshIndicator();
+            }, 1000); // Update counter every second
+        }
+        
+        function stopAutoRefresh() {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+                refreshInterval = null;
+            }
+            document.getElementById('refreshIndicator').textContent = '';
+        }
+        
+        function updateRefreshIndicator() {
+            const indicator = document.getElementById('refreshIndicator');
+            const secondsRemaining = 10 - refreshCounter;
+            indicator.textContent = `(refreshing in ${secondsRemaining}s)`;
         }
         
         function loadSessions() {
@@ -402,10 +475,28 @@
                     sessions.forEach(session => {
                         const progressPercent = (session.processed / session.totalImages) * 100;
                         
+                        // Determine status display
+                        let statusClass = '';
+                        let statusText = '';
+                        
+                        if (session.isComplete) {
+                            statusClass = 'status-complete';
+                            statusText = 'Complete';
+                        } else if (session.isProcessing) {
+                            statusClass = 'status-processing';
+                            statusText = 'Processing';
+                        } else {
+                            statusClass = 'status-paused';
+                            statusText = 'Paused';
+                        }
+                        
                         html += `
                             <div class="session-card">
                                 <div class="session-header">
-                                    <div class="session-title">${session.albumName}</div>
+                                    <div class="session-title">
+                                        ${session.albumName}
+                                        <span class="status-indicator ${statusClass}">${statusText}</span>
+                                    </div>
                                     <div class="session-actions">
                                         <button class="btn-sm btn-secondary" onclick="viewSession('${session.id}')">View</button>
                                         <button class="btn-sm btn-danger" onclick="clearSession('${session.id}')">Clear</button>
@@ -417,17 +508,15 @@
                                         <div class="progress-fill" style="width: ${progressPercent}%"></div>
                                     </div>
                                 </div>
-                                <div style="margin-top: 10px;">
-                                    <button onclick="continueProcessing('${session.id}', ${session.nextIndex})" 
-                                            ${session.isComplete ? 'disabled' : ''}>
-                                        ${session.isComplete ? 'Processing Complete' : 'Continue Processing'}
-                                    </button>
-                                </div>
                             </div>
                         `;
                     });
                     
                     sessionsList.innerHTML = html;
+                    
+                    // Reset refresh counter
+                    refreshCounter = 0;
+                    updateRefreshIndicator();
                 })
                 .catch(error => {
                     document.getElementById('sessionsList').innerHTML = `<p>Error loading sessions: ${error.message}</p>`;
@@ -447,10 +536,25 @@
                         return;
                     }
                     
+                    // Determine status display
+                    let statusClass = '';
+                    let statusText = '';
+                    
+                    if (data.isComplete) {
+                        statusClass = 'status-complete';
+                        statusText = 'Complete';
+                    } else if (data.isProcessing) {
+                        statusClass = 'status-processing';
+                        statusText = 'Processing in background';
+                    } else {
+                        statusClass = 'status-paused';
+                        statusText = 'Paused';
+                    }
+                    
                     let resultHtml = `
-                        <h2>${data.albumName}</h2>
+                        <h2>${data.albumName} <span class="status-indicator ${statusClass}">${statusText}</span></h2>
                         <div class="alert alert-success">
-                            <p>Session Status: ${data.isComplete ? 'Complete' : 'In Progress'}</p>
+                            <p>Processing Status: ${statusText}</p>
                             <p>Total Images: ${data.totalImages}</p>
                             <p>Images Processed: ${data.processed}</p>
                         </div>
@@ -474,10 +578,12 @@
                         resultHtml += `<p><a href="${data.albumUrl}" target="_blank" class="btn-primary">View Album on SmugMug</a></p>`;
                     }
                     
-                    if (!data.isComplete) {
+                    // Only show additional status message if processing
+                    if (data.isProcessing) {
                         resultHtml += `
-                            <div class="action-row">
-                                <button onclick="continueProcessing('${sessionId}', ${data.nextIndex})">Continue Processing</button>
+                            <div class="alert alert-info">
+                                <p>Images are being processed automatically in the background. You can close this page and check back later.</p>
+                                <p>Processing will continue on the server until all images are tagged.</p>
                             </div>
                         `;
                     }
@@ -486,7 +592,10 @@
                         resultHtml += '<h3>Processed Images:</h3>';
                         resultHtml += '<div class="image-container">';
                         
-                        data.processedImages.forEach(img => {
+                        // Show only the last 10 images to avoid overwhelming the page
+                        const imagesToShow = data.processedImages.slice(-10);
+                        
+                        imagesToShow.forEach(img => {
                             resultHtml += `
                                 <div class="image-card">
                                     <div class="image-header">${img.filename}</div>
@@ -505,6 +614,11 @@
                         });
                         
                         resultHtml += '</div>';
+                        
+                        // Show message if there are more images processed than shown
+                        if (data.processedImages.length > 10) {
+                            resultHtml += `<p><em>Showing the 10 most recently processed images out of ${data.processedImages.length} total.</em></p>`;
+                        }
                     }
                     
                     if (data.failedImages && data.failedImages.length > 0) {
@@ -523,6 +637,13 @@
                     // Switch to the appropriate tab
                     const tabEvent = { currentTarget: document.querySelector('.tab-button[onclick*="newProcessTab"]') };
                     openTab(tabEvent, 'newProcessTab');
+                    
+                    // If actively processing, start auto-refresh for the result view
+                    if (data.isProcessing) {
+                        setTimeout(function() {
+                            viewSession(sessionId);
+                        }, 10000); // Refresh every 10 seconds
+                    }
                 })
                 .catch(error => {
                     alert(`Error viewing session: ${error.message}`);
@@ -546,19 +667,6 @@
                 .catch(error => {
                     alert(`Error clearing session: ${error.message}`);
                 });
-        }
-        
-        function continueProcessing(sessionId, nextIndex) {
-            // Set form values to continue processing this session
-            document.getElementById('session_id').value = sessionId;
-            document.getElementById('start_index').value = nextIndex;
-            
-            // Submit the form
-            document.getElementById('tagForm').dispatchEvent(new Event('submit'));
-            
-            // Switch to the appropriate tab
-            const tabEvent = { currentTarget: document.querySelector('.tab-button[onclick*="newProcessTab"]') };
-            openTab(tabEvent, 'newProcessTab');
         }
         
         document.getElementById('tagForm').addEventListener('submit', function(e) {
@@ -602,9 +710,24 @@
                             <strong>Error:</strong> ${data.error}
                         </div>`;
                 } else {
+                    // Determine status display
+                    let statusClass = '';
+                    let statusText = '';
+                    
+                    if (data.isComplete) {
+                        statusClass = 'status-complete';
+                        statusText = 'Complete';
+                    } else if (data.isProcessing) {
+                        statusClass = 'status-processing';
+                        statusText = 'Processing in background';
+                    } else {
+                        statusClass = 'status-paused';
+                        statusText = 'Paused';
+                    }
+                    
                     resultHtml += `
-                        <h2>${data.albumName || 'Processing Results'}</h2>
-                        <div class="alert alert-success">`;
+                        <h2>${data.albumName || 'Processing Results'} <span class="status-indicator ${statusClass}">${statusText}</span></h2>
+                        <div class="alert ${data.isProcessing ? 'alert-info' : 'alert-success'}">`;
                         
                     if (data.message) {
                         resultHtml += `<p>${data.message}</p>`;
@@ -628,13 +751,12 @@
                             </div>
                         </div>`;
                     
-                    // Continue processing button if more images remain
-                    if (data.nextIndex !== -1) {
+                    // Add background processing message
+                    if (data.isProcessing) {
                         resultHtml += `
-                            <div class="action-row">
-                                <button onclick="continueProcessing('${data.sessionId}', ${data.nextIndex})">
-                                    Continue Processing
-                                </button>
+                            <div class="alert alert-info">
+                                <p>Images are being processed automatically in the background. You can close this page and check back later.</p>
+                                <p>Processing will continue on the server until all images are tagged.</p>
                             </div>
                         `;
                     }
@@ -668,14 +790,6 @@
                         resultHtml += '</div>';
                     }
                     
-                    if (data.remainingCount > 0) {
-                        resultHtml += `
-                            <div class="alert alert-warning" style="margin-top: 20px;">
-                                <strong>Note:</strong> ${data.remainingCount} images still need to be processed. 
-                                Click "Continue Processing" to tag more images.
-                            </div>`;
-                    }
-                    
                     if (data.failedImages && data.failedImages.length > 0) {
                         resultHtml += `
                             <h3>Failed Images:</h3>
@@ -706,6 +820,13 @@
                 // Update sessions list if we're in that tab
                 if (document.getElementById('activeSessionsTab').classList.contains('active')) {
                     loadSessions();
+                }
+                
+                // If processing in background, refresh the view periodically
+                if (data.isProcessing) {
+                    setTimeout(function() {
+                        viewSession(data.sessionId);
+                    }, 10000); // Refresh every 10 seconds
                 }
             })
             .catch(error => {
@@ -739,4 +860,3 @@
     </script>
 </body>
 </html>
-EOF
