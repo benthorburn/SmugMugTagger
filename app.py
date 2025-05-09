@@ -361,7 +361,7 @@ def process_images_batch(smugmug, vision_client, album_key, images,
                 # Continue even if we can't determine size
                 logger.debug(f"Could not determine image size: {str(size_error)}")
         # Skip already processed
-        if i in processed_indices:
+            if i in processed_indices:
             logger.debug(f"Skipping already processed image at index {i}")
             continue
             
